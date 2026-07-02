@@ -758,6 +758,8 @@ typedef struct {
     float    choL[CHO_MAX], choR[CHO_MAX]; int cho_pos; float cho_phase;
     float    comp_env;
     float    limL[LIM_LA], limR[LIM_LA]; int lim_pos; float lim_gain;
+    /* Randomize duck: brief output dip that masks param-change clicks. */
+    float    rnd_gain, rnd_gain_tgt; int rnd_timer;
     int      any_held;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
@@ -914,6 +916,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->p.cho_mix = 0.0f; inst->p.cho_rate = 0.35f; inst->p.cho_depth = 0.4f;
     inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.92f;
     inst->lim_gain = 1.0f;
+    inst->rnd_gain = 1.0f; inst->rnd_gain_tgt = 1.0f;
     inst->lfo1.rng = 0x9E3779B9u; inst->lfo2.rng = 0x85EBCA6Bu;
     apply_preset(inst, 2);   /* CaveStrings — pleasant default */
     inst->sm = inst->p;      /* prime smoothed shadow (no startup glide) */
@@ -990,11 +993,17 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
 
 /* ── Parameters ──────────────────────────────────────────────────────────────── */
 
+/* Trigger a short output duck to mask the click of an abrupt parameter change. */
+static void rnd_duck(fizzik_t *inst) { inst->rnd_gain_tgt = 0.12f; inst->rnd_timer = 400; }
+
 static void rnd_exciter(fizzik_t *inst) {
     uint32_t *s = &inst->rng;
-    inst->p.exc_mix = randf(s); inst->p.exc_crackle = randf(s) * 0.5f;
-    inst->p.exc_color = 0.3f + 0.6f * randf(s); inst->p.exc_attack = randf(s) * 0.3f;
-    inst->p.exc_decay = 0.1f + 0.5f * randf(s); inst->p.exc_reso = randf(s) * 0.6f;
+    /* Bold ranges so the change is clearly audible on the next note's attack. */
+    inst->p.exc_mix = randf(s); inst->p.exc_crackle = randf(s) * randf(s);   /* skew low, occasional lots */
+    inst->p.exc_color = 0.15f + 0.85f * randf(s); inst->p.exc_attack = randf(s) * randf(s) * 0.7f;
+    inst->p.exc_decay = 0.05f + 0.9f * randf(s); inst->p.exc_reso = randf(s) * 0.8f;
+    inst->p.vel_level = randf(s); inst->p.vel_color = randf(s);
+    rnd_duck(inst);
 }
 static void rnd_one_reso(fizzik_t *inst, int isB) {
     uint32_t *s = &inst->rng;
@@ -1008,12 +1017,13 @@ static void rnd_one_reso(fizzik_t *inst, int isB) {
     else      { inst->p.b_model=mdl; inst->p.b_struct=str; inst->p.b_decay=dec; inst->p.b_damp=dmp;
                 inst->p.b_pos=pos; inst->p.b_tone=tone; inst->p.b_tune=tune; inst->p.b_tension=tens; }
 }
-static void rnd_reson(fizzik_t *inst) { rnd_one_reso(inst, 0); rnd_one_reso(inst, 1); }
+static void rnd_reson(fizzik_t *inst) { rnd_one_reso(inst, 0); rnd_one_reso(inst, 1); rnd_duck(inst); }
 static void rnd_patch(fizzik_t *inst) {
     rnd_exciter(inst); rnd_reson(inst);
     inst->p.couple = randf(&inst->rng) * 0.7f;
     inst->p.balance = 0.35f + 0.3f * randf(&inst->rng);
     inst->p.makeup = 1.0f;   /* rely on per-resonator auto-level */
+    rnd_duck(inst);
 }
 
 /* Set one param field from a numeric string. */
@@ -1084,13 +1094,14 @@ static void set_param(void *instance, const char *key, const char *val) {
     /* Hidden calibration hook: override makeup gain. */
     if (strcmp(key, "__makeup") == 0) { inst->p.makeup = (float)atof(val); return; }
 
-    /* Triggers (direct set by key). Fire on "Rnd" (enum idx 1) or any nonzero. */
+    /* Triggers (direct set by key). The host only ever set_params these on a user
+     * knob-turn (never for init/state/preset), and its enum knob wraps Go!<->Rnd
+     * caching the index — so fire on EVERY turn (any value) to get single-turn
+     * firing instead of every-other-turn. Display settles to Go! via get_param. */
     if (strncmp(key, "rnd_", 4) == 0) {
-        if (atoi(val) != 0 || strcmp(val, "Rnd") == 0) {
-            if (!strcmp(key,"rnd_patch")) rnd_patch(inst);
-            else if (!strcmp(key,"rnd_exc")) rnd_exciter(inst);
-            else if (!strcmp(key,"rnd_reson")) rnd_reson(inst);
-        }
+        if (!strcmp(key,"rnd_patch")) rnd_patch(inst);
+        else if (!strcmp(key,"rnd_exc")) rnd_exciter(inst);
+        else if (!strcmp(key,"rnd_reson")) rnd_reson(inst);
         return;
     }
     if (strcmp(key, "preset") == 0) {
@@ -1554,8 +1565,13 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             sigL *= cg; sigR *= cg;
         }
 
-        float outL = sigL * level_gain;
-        float outR = sigR * level_gain;
+        /* Randomize duck — smooth dip that hides the click of abrupt param changes. */
+        if (inst->rnd_timer > 0 && --inst->rnd_timer == 0) inst->rnd_gain_tgt = 1.0f;
+        inst->rnd_gain += 0.03f * (inst->rnd_gain_tgt - inst->rnd_gain);
+        float rgain = inst->rnd_gain;
+
+        float outL = sigL * level_gain * rgain;
+        float outR = sigR * level_gain * rgain;
 
         /* Hidden pre-clamp metering for offline calibration. */
         float ap = fabsf(outL) > fabsf(outR) ? fabsf(outL) : fabsf(outR);
