@@ -28,6 +28,7 @@ jobs:
           docker build -t fizzik-builder scripts
           mkdir -p dist/fizzik
           cp src/module.json dist/fizzik/
+          cp src/help.json dist/fizzik/
           docker run --rm -v "$PWD:/repo" -w /repo fizzik-builder bash -c "\
             aarch64-linux-gnu-gcc -O2 -ffast-math -shared -fPIC \
               -o dist/fizzik/dsp.so src/dsp/fizzik.c -lm && \
