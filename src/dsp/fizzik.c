@@ -283,6 +283,8 @@ static inline float wg_process(waveguide_t *w, float input) {
 typedef struct {
     biquad_t f[MAX_MODES];
     float    amp[MAX_MODES];
+    float    mratio[MAX_MODES];    /* mode freq / f0 (pitch-invariant) */
+    float    mq[MAX_MODES];        /* mode Q (pitch-invariant) */
     float    norm;                 /* RMS level normalization */
     int      n;
     /* change-detection signature */
@@ -294,6 +296,16 @@ static void modal_reset(modal_t *m) {
     for (int i = 0; i < MAX_MODES; i++) { m->f[i].z1 = m->f[i].z2 = 0.0f; }
     m->n = 0; m->norm = 1.0f;
     m->f0 = -1.0f;   /* force recompute */
+}
+
+/* Cheap pitch-only retune: rescale mode frequencies, keep filter states + norm
+ * (no candidate regen, no re-measurement, NO state reset — so a ringing note
+ * glides in pitch smoothly under vibrato/bend instead of glitching). */
+static void modal_retune(modal_t *m, float f0) {
+    float nyq = SR * 0.49f;
+    for (int k = 0; k < m->n; k++)
+        biquad_bandpass(&m->f[k], clampf(m->mratio[k] * f0, 20.0f, nyq), m->mq[k]);
+    m->f0 = f0;
 }
 
 typedef struct { float freq, amp; } cand_t;
@@ -368,6 +380,8 @@ static void modal_recompute(modal_t *m, int model, float f0,
         /* band-pass level compensation ~ sqrt(zetaRef/zeta) */
         float gc = clampf(sqrtf(0.02f / zeta), 0.5f, 16.0f);
         m->amp[m->n] = cand[i].amp * gc;
+        m->mratio[m->n] = (f0 > 0.0f) ? fr / f0 : 1.0f;   /* pitch-invariant */
+        m->mq[m->n] = Q;
         m->n++;
     }
     /* Auto-level: drive a fixed reference noise burst through the bank and
@@ -376,7 +390,11 @@ static void modal_recompute(modal_t *m, int model, float f0,
      * balance problem with modal banks (narrow high-Q modes catch little
      * energy from a short excitation, so amplitude-based normalization is
      * wildly off). */
-    for (int k = 0; k < m->n; k++) { m->f[k].z1 = 0.0f; m->f[k].z2 = 0.0f; }
+    /* Measure norm on a scratch copy so the live (possibly ringing) filter
+     * states are never disturbed. */
+    float sz1[MAX_MODES], sz2[MAX_MODES];
+    for (int k = 0; k < m->n; k++) { sz1[k] = m->f[k].z1; sz2[k] = m->f[k].z2;
+                                     m->f[k].z1 = 0.0f; m->f[k].z2 = 0.0f; }
     uint32_t seed = 0x2545F491u;
     double sumsq = 0.0;
     const int MW = 4096;                 /* ~93 ms — captures the ring, not just the onset */
@@ -388,7 +406,7 @@ static void modal_recompute(modal_t *m, int model, float f0,
         for (int k = 0; k < m->n; k++) y += m->amp[k] * biquad_process(&m->f[k], in);
         sumsq += (double)y * (double)y;
     }
-    for (int k = 0; k < m->n; k++) { m->f[k].z1 = 0.0f; m->f[k].z2 = 0.0f; }
+    for (int k = 0; k < m->n; k++) { m->f[k].z1 = sz1[k]; m->f[k].z2 = sz2[k]; }
     float rms = (float)sqrt(sumsq / (double)MW);
     /* Normalize to a target RMS: window-RMS equalizes for decay length (long
      * rings measure high -> quieter; short plucks measure low -> louder). */
@@ -428,13 +446,15 @@ static void reso_set(resonator_t *r, int model, float f0, float mstruct,
         r->wg.pos = clampf(0.02f + 0.9f * pos, 0.02f, 0.98f);
     } else {
         modal_t *m = &r->modal;
-        int dirty = (m->f0 < 0.0f)
-            || fabsf(m->f0 - f0) > 0.01f
+        int struct_dirty = (m->f0 < 0.0f)
             || fabsf(m->mstruct - mstruct) > 1e-3f
             || fabsf(m->mdecay - decay)   > 1e-3f
             || fabsf(m->mdamp - damp)     > 1e-3f
             || fabsf(m->mpos - pos)       > 1e-3f;
-        if (dirty) modal_recompute(m, model, f0, mstruct, decay, damp, pos);
+        if (struct_dirty)
+            modal_recompute(m, model, f0, mstruct, decay, damp, pos);   /* full rebuild */
+        else if (fabsf(m->f0 - f0) > 0.01f)
+            modal_retune(m, f0);   /* cheap pitch glide — no state reset, no re-measure */
     }
 }
 
