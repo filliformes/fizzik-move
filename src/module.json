@@ -157,9 +157,9 @@
       {"key": "at_curve", "name": "AT Curve", "type": "float", "min": 0, "max": 1, "step": 0.01},
 
       {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle", "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad", "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum", "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine"]},
-      {"key": "rnd_patch", "name": "Rnd Patch", "type": "int", "min": 0, "max": 127, "step": 1},
-      {"key": "rnd_exc", "name": "Rnd Exciter", "type": "int", "min": 0, "max": 127, "step": 1},
-      {"key": "rnd_reson", "name": "Rnd Reson", "type": "int", "min": 0, "max": 127, "step": 1}
+      {"key": "rnd_patch", "name": "Rnd Patch", "type": "enum", "options": ["Go!", "Rnd"]},
+      {"key": "rnd_exc", "name": "Rnd Exciter", "type": "enum", "options": ["Go!", "Rnd"]},
+      {"key": "rnd_reson", "name": "Rnd Reson", "type": "enum", "options": ["Go!", "Rnd"]}
     ]
   }
 }
