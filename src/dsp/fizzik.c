@@ -763,9 +763,9 @@ typedef struct {
     float    choL[CHO_MAX], choR[CHO_MAX]; int cho_pos; float cho_phase;
     float    comp_env;
     float    limL[LIM_LA], limR[LIM_LA]; int lim_pos; float lim_gain;
-    /* Randomize duck: fade out -> apply the (deferred) randomize while silent ->
-     * fade back in, so the param/model change never clicks. */
-    float    rnd_gain; int rnd_phase, pending_rnd;
+    /* Randomize duck: fade out -> hold silent while the (deferred) randomize is
+     * applied -> fade back in, so the param/model change never clicks. */
+    float    rnd_gain; int rnd_phase, pending_rnd, rnd_hold;
     int      any_held;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
@@ -1074,11 +1074,23 @@ static void rnd_all(fizzik_t *inst) {
  * back in) so the abrupt parameter/model change is never audible as a click.
  * which: 1=patch, 2=exciter, 3=reson, 4=all. */
 static void trigger_rnd(fizzik_t *inst, int which) { inst->pending_rnd = which; inst->rnd_phase = 1; }
+/* Clear each voice's cross-coupling feedback + DC-blocker so the newly-tuned
+ * resonators don't get a transient kick from the old loop state (a click source
+ * that survives the output fade). Only for resonator-changing randomizes. */
+static void reset_voice_coupling(fizzik_t *inst) {
+    for (int i = 0; i < MAX_VOICES; i++) {
+        voice_t *v = &inst->v[i];
+        v->prevA = v->prevB = 0.0f;
+        v->dcA.x1 = v->dcA.y1 = 0.0f; v->dcB.x1 = v->dcB.y1 = 0.0f;
+    }
+}
 static void apply_pending_rnd(fizzik_t *inst) {
-    if      (inst->pending_rnd == 1) rnd_patch(inst);
-    else if (inst->pending_rnd == 2) rnd_exciter(inst);
-    else if (inst->pending_rnd == 3) rnd_reson(inst);
-    else if (inst->pending_rnd == 4) rnd_all(inst);
+    int which = inst->pending_rnd;
+    if      (which == 1) rnd_patch(inst);
+    else if (which == 2) rnd_exciter(inst);
+    else if (which == 3) rnd_reson(inst);
+    else if (which == 4) rnd_all(inst);
+    if (which != 2) reset_voice_coupling(inst);   /* exciter doesn't touch resonators */
     inst->pending_rnd = 0;
 }
 
@@ -1626,13 +1638,22 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             sigL *= cg; sigR *= cg;
         }
 
-        /* Randomize duck state machine: fade out (phase 1) -> apply the deferred
-         * randomize at the bottom (silent) -> fade back in (phase 2). */
+        /* Randomize duck state machine: fade out (~18 ms) -> hold silent (~22 ms)
+         * while the deferred randomize is applied and its transient settles ->
+         * fade back in (~70 ms). Long, fully-masked crossfade = no click. */
         if (inst->rnd_phase == 1) {
-            inst->rnd_gain += 0.02f * (0.0f - inst->rnd_gain);   /* ~5 ms fade-out */
-            if (inst->rnd_gain < 0.02f) { apply_pending_rnd(inst); inst->rnd_phase = 2; }
+            inst->rnd_gain += 0.005f * (0.0f - inst->rnd_gain);
+            if (inst->rnd_gain < 0.02f) {
+                inst->rnd_gain = 0.0f;
+                apply_pending_rnd(inst);
+                inst->rnd_hold = 960;                            /* ~22 ms of silence */
+                inst->rnd_phase = 3;
+            }
+        } else if (inst->rnd_phase == 3) {
+            inst->rnd_gain = 0.0f;
+            if (--inst->rnd_hold <= 0) inst->rnd_phase = 2;
         } else if (inst->rnd_phase == 2) {
-            inst->rnd_gain += 0.004f * (1.0f - inst->rnd_gain);  /* ~25 ms fade-in */
+            inst->rnd_gain += 0.0014f * (1.0f - inst->rnd_gain);
             if (inst->rnd_gain > 0.995f) { inst->rnd_gain = 1.0f; inst->rnd_phase = 0; }
         }
         float rgain = inst->rnd_gain;
