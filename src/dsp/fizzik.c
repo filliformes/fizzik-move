@@ -758,8 +758,9 @@ typedef struct {
     float    choL[CHO_MAX], choR[CHO_MAX]; int cho_pos; float cho_phase;
     float    comp_env;
     float    limL[LIM_LA], limR[LIM_LA]; int lim_pos; float lim_gain;
-    /* Randomize duck: brief output dip that masks param-change clicks. */
-    float    rnd_gain, rnd_gain_tgt; int rnd_timer;
+    /* Randomize duck: fade out -> apply the (deferred) randomize while silent ->
+     * fade back in, so the param/model change never clicks. */
+    float    rnd_gain; int rnd_phase, pending_rnd;
     int      any_held;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
@@ -916,7 +917,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->p.cho_mix = 0.0f; inst->p.cho_rate = 0.35f; inst->p.cho_depth = 0.4f;
     inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.92f;
     inst->lim_gain = 1.0f;
-    inst->rnd_gain = 1.0f; inst->rnd_gain_tgt = 1.0f;
+    inst->rnd_gain = 1.0f;   /* rnd_phase / pending_rnd = 0 (idle) from calloc */
     inst->lfo1.rng = 0x9E3779B9u; inst->lfo2.rng = 0x85EBCA6Bu;
     apply_preset(inst, 2);   /* CaveStrings — pleasant default */
     inst->sm = inst->p;      /* prime smoothed shadow (no startup glide) */
@@ -993,9 +994,6 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
 
 /* ── Parameters ──────────────────────────────────────────────────────────────── */
 
-/* Trigger a short output duck to mask the click of an abrupt parameter change. */
-static void rnd_duck(fizzik_t *inst) { inst->rnd_gain_tgt = 0.12f; inst->rnd_timer = 400; }
-
 static void rnd_exciter(fizzik_t *inst) {
     uint32_t *s = &inst->rng;
     /* Bold ranges so the change is clearly audible on the next note's attack. */
@@ -1003,7 +1001,6 @@ static void rnd_exciter(fizzik_t *inst) {
     inst->p.exc_color = 0.15f + 0.6f * randf(s); inst->p.exc_attack = randf(s) * randf(s) * 0.7f;  /* not too bright */
     inst->p.exc_decay = 0.05f + 0.9f * randf(s); inst->p.exc_reso = randf(s) * 0.6f;
     inst->p.vel_level = randf(s); inst->p.vel_color = randf(s);
-    rnd_duck(inst);
 }
 static void rnd_one_reso(fizzik_t *inst, int isB) {
     uint32_t *s = &inst->rng;
@@ -1025,13 +1022,23 @@ static void rnd_one_reso(fizzik_t *inst, int isB) {
     else      { inst->p.b_model=mdl; inst->p.b_struct=str; inst->p.b_decay=dec; inst->p.b_damp=dmp;
                 inst->p.b_pos=pos; inst->p.b_tone=tone; inst->p.b_tune=tune; inst->p.b_tension=tens; }
 }
-static void rnd_reson(fizzik_t *inst) { rnd_one_reso(inst, 0); rnd_one_reso(inst, 1); rnd_duck(inst); }
+static void rnd_reson(fizzik_t *inst) { rnd_one_reso(inst, 0); rnd_one_reso(inst, 1); }
 static void rnd_patch(fizzik_t *inst) {
     rnd_exciter(inst); rnd_reson(inst);
     inst->p.couple = randf(&inst->rng) * 0.45f;          /* keep coupling from self-oscillating */
     inst->p.balance = 0.35f + 0.3f * randf(&inst->rng);
     inst->p.makeup = 1.0f;   /* rely on per-resonator auto-level */
-    rnd_duck(inst);
+}
+
+/* Request a randomize: fade out first (render applies it while silent, then fades
+ * back in) so the abrupt parameter/model change is never audible as a click.
+ * which: 1=patch, 2=exciter, 3=reson. */
+static void trigger_rnd(fizzik_t *inst, int which) { inst->pending_rnd = which; inst->rnd_phase = 1; }
+static void apply_pending_rnd(fizzik_t *inst) {
+    if      (inst->pending_rnd == 1) rnd_patch(inst);
+    else if (inst->pending_rnd == 2) rnd_exciter(inst);
+    else if (inst->pending_rnd == 3) rnd_reson(inst);
+    inst->pending_rnd = 0;
 }
 
 /* Set one param field from a numeric string. */
@@ -1086,9 +1093,9 @@ static void set_param(void *instance, const char *key, const char *val) {
             apply_at_preset(inst, inst->p.at_preset + delta); return;
         }
         if (strncmp(pk, "rnd_", 4) == 0) {
-            if (delta != 0) { if (!strcmp(pk,"rnd_patch")) rnd_patch(inst);
-                              else if (!strcmp(pk,"rnd_exc")) rnd_exciter(inst);
-                              else if (!strcmp(pk,"rnd_reson")) rnd_reson(inst); }
+            if (delta != 0) { if (!strcmp(pk,"rnd_patch")) trigger_rnd(inst,1);
+                              else if (!strcmp(pk,"rnd_exc")) trigger_rnd(inst,2);
+                              else if (!strcmp(pk,"rnd_reson")) trigger_rnd(inst,3); }
             return;
         }
         const pdesc_t *d = find_pdesc(pk);
@@ -1107,9 +1114,9 @@ static void set_param(void *instance, const char *key, const char *val) {
      * (or any nonzero), never on "idle". */
     if (strncmp(key, "rnd_", 4) == 0) {
         if (strcmp(val, "trigger") == 0 || atoi(val) != 0) {
-            if (!strcmp(key,"rnd_patch")) rnd_patch(inst);
-            else if (!strcmp(key,"rnd_exc")) rnd_exciter(inst);
-            else if (!strcmp(key,"rnd_reson")) rnd_reson(inst);
+            if (!strcmp(key,"rnd_patch")) trigger_rnd(inst,1);
+            else if (!strcmp(key,"rnd_exc")) trigger_rnd(inst,2);
+            else if (!strcmp(key,"rnd_reson")) trigger_rnd(inst,3);
         }
         return;
     }
@@ -1574,9 +1581,15 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             sigL *= cg; sigR *= cg;
         }
 
-        /* Randomize duck — smooth dip that hides the click of abrupt param changes. */
-        if (inst->rnd_timer > 0 && --inst->rnd_timer == 0) inst->rnd_gain_tgt = 1.0f;
-        inst->rnd_gain += 0.03f * (inst->rnd_gain_tgt - inst->rnd_gain);
+        /* Randomize duck state machine: fade out (phase 1) -> apply the deferred
+         * randomize at the bottom (silent) -> fade back in (phase 2). */
+        if (inst->rnd_phase == 1) {
+            inst->rnd_gain += 0.02f * (0.0f - inst->rnd_gain);   /* ~5 ms fade-out */
+            if (inst->rnd_gain < 0.02f) { apply_pending_rnd(inst); inst->rnd_phase = 2; }
+        } else if (inst->rnd_phase == 2) {
+            inst->rnd_gain += 0.004f * (1.0f - inst->rnd_gain);  /* ~25 ms fade-in */
+            if (inst->rnd_gain > 0.995f) { inst->rnd_gain = 1.0f; inst->rnd_phase = 0; }
+        }
         float rgain = inst->rnd_gain;
 
         float outL = sigL * level_gain * rgain;
