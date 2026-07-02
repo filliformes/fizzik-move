@@ -1,0 +1,100 @@
+{
+  "id": "fizzik",
+  "name": "Fizzik",
+  "version": "0.1.0",
+  "api_version": 2,
+  "component_type": "sound_generator",
+  "description": "Polyphonic simplex physical-modeling synth: two coupled resonators (string/beam/plate/membrane) with tension-modulation.",
+  "author": "Filliformes",
+  "abbrev": "FIZZIK",
+  "dsp": "dsp.so",
+  "capabilities": {
+    "audio_out": true,
+    "midi_in": true,
+    "chainable": true,
+    "component_type": "sound_generator",
+    "ui_hierarchy": {
+      "modes": null,
+      "levels": {
+        "root": {
+          "name": "Fizzik",
+          "knobs": ["exc_mix", "exc_crackle", "exc_color", "exc_attack", "exc_decay", "exc_reso", "vel_level", "vel_color"],
+          "params": [
+            {"level": "Exciter", "label": "Exciter"},
+            {"level": "ResonA", "label": "Reson A"},
+            {"level": "ResonB", "label": "Reson B"},
+            {"level": "Voice", "label": "Voice"},
+            {"level": "Patch", "label": "Patch"}
+          ]
+        },
+        "Exciter": {
+          "name": "Exciter",
+          "knobs": ["exc_mix", "exc_crackle", "exc_color", "exc_attack", "exc_decay", "exc_reso", "vel_level", "vel_color"],
+          "params": ["exc_mix", "exc_crackle", "exc_color", "exc_attack", "exc_decay", "exc_reso", "vel_level", "vel_color"]
+        },
+        "ResonA": {
+          "name": "Reson A",
+          "knobs": ["a_model", "a_struct", "a_decay", "a_damp", "a_pos", "a_tone", "a_tune", "a_tension"],
+          "params": ["a_model", "a_struct", "a_decay", "a_damp", "a_pos", "a_tone", "a_tune", "a_tension"]
+        },
+        "ResonB": {
+          "name": "Reson B",
+          "knobs": ["b_model", "b_struct", "b_decay", "b_damp", "b_pos", "b_tone", "b_tune", "b_tension"],
+          "params": ["b_model", "b_struct", "b_decay", "b_damp", "b_pos", "b_tone", "b_tune", "b_tension"]
+        },
+        "Voice": {
+          "name": "Voice",
+          "knobs": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "space", "level"],
+          "params": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "space", "level"]
+        },
+        "Patch": {
+          "name": "Patch",
+          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson"],
+          "params": ["preset", "rnd_patch", "rnd_exc", "rnd_reson"]
+        }
+      }
+    },
+    "chain_params": [
+      {"key": "exc_mix", "name": "Exc Mix", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "exc_crackle", "name": "Crackle", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "exc_color", "name": "Color", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "exc_attack", "name": "Attack", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "exc_decay", "name": "Decay", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "exc_reso", "name": "Exc Reso", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "vel_level", "name": "Vel Level", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "vel_color", "name": "Vel Color", "type": "float", "min": 0, "max": 1, "step": 0.01},
+
+      {"key": "a_model", "name": "Model A", "type": "enum", "options": ["String", "Beam", "Plate", "Membrane"]},
+      {"key": "a_struct", "name": "Structure A", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "a_decay", "name": "Decay A", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "a_damp", "name": "Damp A", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "a_pos", "name": "Position A", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "a_tone", "name": "Tone A", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "a_tune", "name": "Tune A", "type": "int", "min": -24, "max": 24, "step": 1},
+      {"key": "a_tension", "name": "Tension A", "type": "float", "min": 0, "max": 1, "step": 0.01},
+
+      {"key": "b_model", "name": "Model B", "type": "enum", "options": ["String", "Beam", "Plate", "Membrane"]},
+      {"key": "b_struct", "name": "Structure B", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "b_decay", "name": "Decay B", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "b_damp", "name": "Damp B", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "b_pos", "name": "Position B", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "b_tone", "name": "Tone B", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "b_tune", "name": "Tune B", "type": "int", "min": -24, "max": 24, "step": 1},
+      {"key": "b_tension", "name": "Tension B", "type": "float", "min": 0, "max": 1, "step": 0.01},
+
+      {"key": "couple", "name": "Couple", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "balance", "name": "Balance", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "glide", "name": "Glide", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "amp_attack", "name": "Amp Atk", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "amp_release", "name": "Amp Rel", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "spread", "name": "Spread", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "space", "name": "Space", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "level", "name": "Level", "type": "float", "min": 0, "max": 1, "step": 0.01},
+
+      {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle"]},
+      {"key": "rnd_patch", "name": "Rnd Patch", "type": "int", "min": 0, "max": 127, "step": 1},
+      {"key": "rnd_exc", "name": "Rnd Exciter", "type": "int", "min": 0, "max": 127, "step": 1},
+      {"key": "rnd_reson", "name": "Rnd Reson", "type": "int", "min": 0, "max": 127, "step": 1}
+    ]
+  }
+}
