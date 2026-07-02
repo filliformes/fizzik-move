@@ -34,6 +34,7 @@
 
 #define MAX_VOICES    6
 #define DELAY_MAX     2048      /* single-loop waveguide, min ~21.5 Hz */
+#define DLY_MAX       33075     /* FX delay line, 0.75 s @ 44.1k */
 #define N_ALLPASS     4         /* dispersion sections */
 #define MAX_MODES     24        /* modal bank size */
 #define MAX_CAND      256       /* modal candidate scratch */
@@ -56,14 +57,15 @@ static const char *PRESET_NAMES[N_PRESETS] = {
 };
 
 /* Page-aware knob overlay: keys per page (index = current_page). */
-static const char *PAGE_KEYS[5][8] = {
+static const char *PAGE_KEYS[6][8] = {
     { "exc_mix","exc_crackle","exc_color","exc_attack","exc_decay","exc_reso","vel_level","vel_color" },
     { "a_model","a_struct","a_decay","a_damp","a_pos","a_tone","a_tune","a_tension" },
     { "b_model","b_struct","b_decay","b_damp","b_pos","b_tone","b_tune","b_tension" },
-    { "couple","balance","glide","amp_attack","amp_release","spread","space","level" },
+    { "couple","balance","glide","amp_attack","amp_release","spread","drive","level" },
+    { "rev_mix","rev_size","rev_damp","dly_mix","dly_time","dly_fb","dly_tone","width" },
     { "preset","rnd_patch","rnd_exc","rnd_reson","","","","" }
 };
-static const int PAGE_NKNOBS[5] = { 8, 8, 8, 8, 4 };
+static const int PAGE_NKNOBS[6] = { 8, 8, 8, 8, 8, 4 };
 
 /* ── Small helpers ───────────────────────────────────────────────────────────── */
 
@@ -220,7 +222,7 @@ static inline float wg_process(waveguide_t *w, float input) {
 
     /* Tension modulation: raise pitch (shorten loop) with loop energy. */
     float k = 1.0f + w->alpha * w->energy;
-    if (k < 1.0f) k = 1.0f; if (k > 4.0f) k = 4.0f;
+    k = clampf(k, 1.0f, 4.0f);
     float Leff = w->len / sqrtf(k);
 
     float out = wg_read(w, Leff);
@@ -246,7 +248,7 @@ static inline float wg_process(waveguide_t *w, float input) {
     w->dl[w->wpos] = sanitize(v + input);
     w->wpos++; if (w->wpos >= DELAY_MAX) w->wpos = 0;
 
-    return pickup;
+    return pickup * 0.45f;   /* trim: waveguide runs hot vs modal */
 }
 
 /* ── Modal resonator (Beam / Plate / Membrane) ───────────────────────────────── */
@@ -328,7 +330,6 @@ static void modal_recompute(modal_t *m, int model, float f0,
     qsort(cand, nc, sizeof(cand_t), cand_cmp);
 
     m->n = 0;
-    float sumsq = 0.0f;
     for (int i = 0; i < nc && m->n < MAX_MODES; i++) {
         float fr = cand[i].freq;
         if (fr < 20.0f || fr > nyq) continue;
@@ -339,14 +340,32 @@ static void modal_recompute(modal_t *m, int model, float f0,
         biquad_bandpass(&m->f[m->n], fr, Q);
         /* band-pass level compensation ~ sqrt(zetaRef/zeta) */
         float gc = clampf(sqrtf(0.02f / zeta), 0.5f, 16.0f);
-        float a = cand[i].amp * gc;
-        m->amp[m->n] = a;
-        sumsq += a * a;
+        m->amp[m->n] = cand[i].amp * gc;
         m->n++;
     }
-    /* Level-normalize so overall output is ~unity regardless of mode count /
-     * resonance (relative mode weighting from gc is preserved). */
-    m->norm = 0.7f / sqrtf(sumsq + 1e-9f);
+    /* Auto-level: drive a fixed reference noise burst through the bank and
+     * measure the output peak, then normalize to a target. This makes level
+     * consistent across mode count / resonance / pitch — the single biggest
+     * balance problem with modal banks (narrow high-Q modes catch little
+     * energy from a short excitation, so amplitude-based normalization is
+     * wildly off). */
+    for (int k = 0; k < m->n; k++) { m->f[k].z1 = 0.0f; m->f[k].z2 = 0.0f; }
+    uint32_t seed = 0x2545F491u;
+    double sumsq = 0.0;
+    const int MW = 4096;                 /* ~93 ms — captures the ring, not just the onset */
+    for (int s = 0; s < MW; s++) {
+        float in = 0.0f;
+        if (s < 128) { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+                       in = (float)(seed & 0xFFFF) / 32768.0f - 1.0f; }
+        float y = 0.0f;
+        for (int k = 0; k < m->n; k++) y += m->amp[k] * biquad_process(&m->f[k], in);
+        sumsq += (double)y * (double)y;
+    }
+    for (int k = 0; k < m->n; k++) { m->f[k].z1 = 0.0f; m->f[k].z2 = 0.0f; }
+    float rms = (float)sqrt(sumsq / (double)MW);
+    /* Normalize to a target RMS: window-RMS equalizes for decay length (long
+     * rings measure high -> quieter; short plucks measure low -> louder). */
+    m->norm = 0.18f / (rms + 1e-9f);
 }
 
 static inline float modal_process(modal_t *m, float input) {
@@ -469,7 +488,11 @@ typedef struct {
     float exc_mix, exc_crackle, exc_color, exc_attack, exc_decay, exc_reso, vel_level, vel_color;
     int   a_model; float a_struct, a_decay, a_damp, a_pos, a_tone; int a_tune; float a_tension;
     int   b_model; float b_struct, b_decay, b_damp, b_pos, b_tone; int b_tune; float b_tension;
-    float couple, balance, glide, amp_attack, amp_release, spread, space, level;
+    /* NOTE: the 7th Voice slot is the preset's reverb mix (was "space"). */
+    float couple, balance, glide, amp_attack, amp_release, spread, rev_mix, level;
+    float makeup;   /* per-preset level compensation (not a knob) */
+    /* FX extras (defaulted in apply_preset; zero-filled by the preset table). */
+    float drive, rev_size, rev_damp, dly_mix, dly_time, dly_fb, dly_tone, width;
 } params_t;
 
 /* ── Simple stereo Schroeder reverb (Space) ──────────────────────────────────── */
@@ -519,31 +542,38 @@ typedef struct {
     int      preset_idx;
     uint32_t rng;
     reverb_ch_t rvL, rvR;
+    /* Stereo delay line. */
+    float    dlyL[DLY_MAX], dlyR[DLY_MAX];
+    int      dly_pos;
+    float    dly_lpL, dly_lpR;
+    float    dly_time_smooth;
     int      any_held;
+    /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
+    double   meter_sumsq; float meter_peak; long meter_cnt;
 } fizzik_t;
 
 /* ── Presets ─────────────────────────────────────────────────────────────────── */
 /* {exc_mix,crackle,color,attack,decay,reso,velL,velC,
     aMdl,aStr,aDec,aDmp,aPos,aTone,aTune,aTens,
     bMdl,bStr,bDec,bDmp,bPos,bTone,bTune,bTens,
-    couple,balance,glide,ampA,ampR,spread,space,level} */
+    couple,balance,glide,ampA,ampR,spread,space,level, makeup} — makeup baked from offline meter (peak->0.8) */
 static const params_t PRESETS[N_PRESETS] = {
-  /* AlienChurch */    {0.2f,0.1f,0.7f,0.05f,0.4f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.9f,0.5f,0.5f,0.7f,0,0.0f, MODEL_PLATE,0.4f,0.85f,0.4f,0.4f,0.6f,7,0.0f, 0.35f,0.5f,0.2f,0.3f,0.7f,0.6f,0.6f,0.6f},
-  /* BowedGlass */     {0.0f,0.0f,0.5f,0.4f,0.6f,0.2f,0.2f,0.3f, MODEL_PLATE,0.3f,0.95f,0.6f,0.4f,0.6f,0,0.0f, MODEL_PLATE,0.5f,0.9f,0.5f,0.5f,0.7f,12,0.0f, 0.5f,0.5f,0.1f,0.5f,0.6f,0.5f,0.5f,0.55f},
-  /* CaveStrings */    {0.1f,0.05f,0.6f,0.1f,0.5f,0.4f,0.4f,0.3f, MODEL_STRING,0.2f,0.85f,0.4f,0.15f,0.6f,0,0.2f, MODEL_STRING,0.1f,0.8f,0.5f,0.25f,0.55f,-12,0.15f, 0.3f,0.5f,0.15f,0.05f,0.5f,0.6f,0.7f,0.6f},
-  /* CouncilsPiano */  {0.6f,0.0f,0.75f,0.01f,0.15f,0.2f,0.6f,0.5f, MODEL_STRING,0.35f,0.75f,0.6f,0.2f,0.7f,0,0.25f, MODEL_BEAM,0.15f,0.7f,0.6f,0.5f,0.65f,12,0.0f, 0.15f,0.35f,0.0f,0.02f,0.4f,0.4f,0.35f,0.6f},
-  /* DistortedBass */  {0.4f,0.2f,0.4f,0.01f,0.2f,0.6f,0.7f,0.4f, MODEL_STRING,0.0f,0.7f,0.3f,0.3f,0.4f,-12,0.6f, MODEL_STRING,0.05f,0.65f,0.4f,0.35f,0.35f,-12,0.7f, 0.55f,0.5f,0.05f,0.02f,0.35f,0.3f,0.2f,0.7f},
-  /* FeedbackHarp */   {0.2f,0.1f,0.65f,0.02f,0.25f,0.5f,0.5f,0.5f, MODEL_STRING,0.15f,0.92f,0.5f,0.4f,0.7f,0,0.3f, MODEL_STRING,0.2f,0.9f,0.55f,0.6f,0.6f,7,0.35f, 0.7f,0.5f,0.1f,0.03f,0.5f,0.55f,0.5f,0.55f},
-  /* JudgementAwaits */{0.15f,0.15f,0.55f,0.08f,0.5f,0.35f,0.3f,0.4f, MODEL_PLATE,0.7f,0.9f,0.6f,0.45f,0.5f,-12,0.0f, MODEL_MEMBRANE,0.5f,0.88f,0.5f,0.5f,0.45f,0,0.0f, 0.45f,0.5f,0.2f,0.2f,0.8f,0.6f,0.75f,0.6f},
-  /* OldResonances */  {0.1f,0.1f,0.5f,0.1f,0.55f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.4f,0.85f,0.55f,0.5f,0.6f,0,0.0f, MODEL_PLATE,0.6f,0.8f,0.45f,0.4f,0.55f,5,0.0f, 0.4f,0.5f,0.15f,0.15f,0.65f,0.6f,0.65f,0.6f},
-  /* PreparedPiano */  {0.5f,0.35f,0.7f,0.01f,0.18f,0.3f,0.6f,0.5f, MODEL_STRING,0.4f,0.7f,0.55f,0.25f,0.7f,0,0.2f, MODEL_MEMBRANE,0.3f,0.6f,0.6f,0.4f,0.5f,12,0.0f, 0.4f,0.45f,0.0f,0.02f,0.4f,0.45f,0.35f,0.62f},
-  /* RythmicBow */     {0.05f,0.05f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_STRING,0.25f,0.9f,0.45f,0.3f,0.6f,0,0.25f, MODEL_PLATE,0.4f,0.85f,0.5f,0.45f,0.6f,7,0.0f, 0.55f,0.5f,0.1f,0.3f,0.55f,0.5f,0.5f,0.55f},
-  /* SensitiveSkin */  {0.3f,0.2f,0.6f,0.02f,0.3f,0.45f,0.55f,0.5f, MODEL_MEMBRANE,0.5f,0.75f,0.5f,0.5f,0.55f,0,0.0f, MODEL_STRING,0.15f,0.8f,0.5f,0.35f,0.6f,0,0.3f, 0.45f,0.5f,0.05f,0.05f,0.45f,0.55f,0.45f,0.6f},
-  /* Sharp */          {0.5f,0.05f,0.85f,0.005f,0.1f,0.3f,0.7f,0.6f, MODEL_BEAM,0.6f,0.65f,0.7f,0.3f,0.8f,0,0.0f, MODEL_BEAM,0.8f,0.6f,0.75f,0.5f,0.75f,12,0.0f, 0.2f,0.5f,0.0f,0.01f,0.3f,0.5f,0.3f,0.6f},
-  /* ShockingPluck */  {0.55f,0.1f,0.7f,0.005f,0.12f,0.4f,0.75f,0.6f, MODEL_STRING,0.3f,0.72f,0.6f,0.2f,0.75f,0,0.4f, MODEL_STRING,0.2f,0.68f,0.6f,0.3f,0.7f,0,0.45f, 0.25f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.65f},
-  /* Slappy */         {0.35f,0.25f,0.6f,0.005f,0.1f,0.5f,0.7f,0.5f, MODEL_MEMBRANE,0.3f,0.55f,0.6f,0.4f,0.45f,0,0.0f, MODEL_STRING,0.1f,0.6f,0.5f,0.3f,0.4f,-12,0.5f, 0.3f,0.45f,0.0f,0.01f,0.3f,0.45f,0.25f,0.68f},
-  /* SurroundedByBells*/{0.4f,0.05f,0.8f,0.01f,0.3f,0.25f,0.5f,0.5f, MODEL_PLATE,0.8f,0.92f,0.55f,0.5f,0.75f,12,0.0f, MODEL_PLATE,0.5f,0.9f,0.6f,0.45f,0.7f,19,0.0f, 0.35f,0.5f,0.1f,0.02f,0.7f,0.65f,0.7f,0.55f},
-  /* XyloStyle */      {0.6f,0.0f,0.85f,0.005f,0.12f,0.2f,0.65f,0.55f, MODEL_BEAM,0.9f,0.6f,0.7f,0.35f,0.8f,0,0.0f, MODEL_BEAM,0.7f,0.55f,0.75f,0.45f,0.75f,12,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.62f},
+  /* AlienChurch */    {0.2f,0.1f,0.7f,0.05f,0.4f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.9f,0.5f,0.5f,0.7f,0,0.0f, MODEL_PLATE,0.4f,0.85f,0.4f,0.4f,0.6f,7,0.0f, 0.35f,0.5f,0.2f,0.3f,0.7f,0.6f,0.6f,0.6f, 0.323f},
+  /* BowedGlass */     {0.0f,0.0f,0.5f,0.4f,0.6f,0.2f,0.2f,0.3f, MODEL_PLATE,0.3f,0.95f,0.6f,0.4f,0.6f,0,0.0f, MODEL_PLATE,0.5f,0.9f,0.5f,0.5f,0.7f,12,0.0f, 0.5f,0.5f,0.1f,0.5f,0.6f,0.5f,0.5f,0.55f, 0.778f},
+  /* CaveStrings */    {0.1f,0.05f,0.6f,0.1f,0.5f,0.4f,0.4f,0.3f, MODEL_STRING,0.2f,0.85f,0.4f,0.15f,0.6f,0,0.2f, MODEL_STRING,0.1f,0.8f,0.5f,0.25f,0.55f,-12,0.15f, 0.3f,0.5f,0.15f,0.05f,0.5f,0.6f,0.7f,0.6f, 1.048f},
+  /* CouncilsPiano */  {0.6f,0.0f,0.75f,0.01f,0.15f,0.2f,0.6f,0.5f, MODEL_STRING,0.35f,0.75f,0.6f,0.2f,0.7f,0,0.25f, MODEL_BEAM,0.15f,0.7f,0.6f,0.5f,0.65f,12,0.0f, 0.15f,0.35f,0.0f,0.02f,0.4f,0.4f,0.35f,0.6f, 2.172f},
+  /* DistortedBass */  {0.4f,0.2f,0.4f,0.01f,0.2f,0.6f,0.7f,0.4f, MODEL_STRING,0.0f,0.7f,0.3f,0.3f,0.4f,-12,0.6f, MODEL_STRING,0.05f,0.65f,0.4f,0.35f,0.35f,-12,0.7f, 0.55f,0.5f,0.05f,0.02f,0.35f,0.3f,0.2f,0.7f, 1.755f},
+  /* FeedbackHarp */   {0.2f,0.1f,0.65f,0.02f,0.25f,0.5f,0.5f,0.5f, MODEL_STRING,0.15f,0.92f,0.5f,0.4f,0.7f,0,0.3f, MODEL_STRING,0.2f,0.9f,0.55f,0.6f,0.6f,7,0.35f, 0.7f,0.5f,0.1f,0.03f,0.5f,0.55f,0.5f,0.55f, 1.630f},
+  /* JudgementAwaits */{0.15f,0.15f,0.55f,0.08f,0.5f,0.35f,0.3f,0.4f, MODEL_PLATE,0.7f,0.9f,0.6f,0.45f,0.5f,-12,0.0f, MODEL_MEMBRANE,0.5f,0.88f,0.5f,0.5f,0.45f,0,0.0f, 0.45f,0.5f,0.2f,0.2f,0.8f,0.6f,0.75f,0.6f, 0.356f},
+  /* OldResonances */  {0.1f,0.1f,0.5f,0.1f,0.55f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.4f,0.85f,0.55f,0.5f,0.6f,0,0.0f, MODEL_PLATE,0.6f,0.8f,0.45f,0.4f,0.55f,5,0.0f, 0.4f,0.5f,0.15f,0.15f,0.65f,0.6f,0.65f,0.6f, 0.381f},
+  /* PreparedPiano */  {0.5f,0.35f,0.7f,0.01f,0.18f,0.3f,0.6f,0.5f, MODEL_STRING,0.4f,0.7f,0.55f,0.25f,0.7f,0,0.2f, MODEL_MEMBRANE,0.3f,0.6f,0.6f,0.4f,0.5f,12,0.0f, 0.4f,0.45f,0.0f,0.02f,0.4f,0.45f,0.35f,0.62f, 0.613f},
+  /* RythmicBow */     {0.05f,0.05f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_STRING,0.25f,0.9f,0.45f,0.3f,0.6f,0,0.25f, MODEL_PLATE,0.4f,0.85f,0.5f,0.45f,0.6f,7,0.0f, 0.55f,0.5f,0.1f,0.3f,0.55f,0.5f,0.5f,0.55f, 0.423f},
+  /* SensitiveSkin */  {0.3f,0.2f,0.6f,0.02f,0.3f,0.45f,0.55f,0.5f, MODEL_MEMBRANE,0.5f,0.75f,0.5f,0.5f,0.55f,0,0.0f, MODEL_STRING,0.15f,0.8f,0.5f,0.35f,0.6f,0,0.3f, 0.45f,0.5f,0.05f,0.05f,0.45f,0.55f,0.45f,0.6f, 0.441f},
+  /* Sharp */          {0.5f,0.05f,0.85f,0.005f,0.1f,0.3f,0.7f,0.6f, MODEL_BEAM,0.6f,0.65f,0.7f,0.3f,0.8f,0,0.0f, MODEL_BEAM,0.8f,0.6f,0.75f,0.5f,0.75f,12,0.0f, 0.2f,0.5f,0.0f,0.01f,0.3f,0.5f,0.3f,0.6f, 3.890f},
+  /* ShockingPluck */  {0.55f,0.1f,0.7f,0.005f,0.12f,0.4f,0.75f,0.6f, MODEL_STRING,0.3f,0.72f,0.6f,0.2f,0.75f,0,0.4f, MODEL_STRING,0.2f,0.68f,0.6f,0.3f,0.7f,0,0.45f, 0.25f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.65f, 1.086f},
+  /* Slappy */         {0.35f,0.25f,0.6f,0.005f,0.1f,0.5f,0.7f,0.5f, MODEL_MEMBRANE,0.3f,0.55f,0.6f,0.4f,0.45f,0,0.0f, MODEL_STRING,0.1f,0.6f,0.5f,0.3f,0.4f,-12,0.5f, 0.3f,0.45f,0.0f,0.01f,0.3f,0.45f,0.25f,0.68f, 0.297f},
+  /* SurroundedByBells*/{0.4f,0.05f,0.8f,0.01f,0.3f,0.25f,0.5f,0.5f, MODEL_PLATE,0.8f,0.92f,0.55f,0.5f,0.75f,12,0.0f, MODEL_PLATE,0.5f,0.9f,0.6f,0.45f,0.7f,19,0.0f, 0.35f,0.5f,0.1f,0.02f,0.7f,0.65f,0.7f,0.55f, 0.591f},
+  /* XyloStyle */      {0.6f,0.0f,0.85f,0.005f,0.12f,0.2f,0.65f,0.55f, MODEL_BEAM,0.9f,0.6f,0.7f,0.35f,0.8f,0,0.0f, MODEL_BEAM,0.7f,0.55f,0.75f,0.45f,0.75f,12,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.62f, 2.006f},
 };
 
 /* ── Parameter descriptor table (float/int fields of params_t) ───────────────── */
@@ -571,7 +601,12 @@ static const pdesc_t PDESC[] = {
     PF("couple","Couple",0,1,0.01f,couple), PF("balance","Balance",0,1,0.01f,balance),
     PF("glide","Glide",0,1,0.01f,glide), PF("amp_attack","Amp Atk",0,1,0.01f,amp_attack),
     PF("amp_release","Amp Rel",0,1,0.01f,amp_release), PF("spread","Spread",0,1,0.01f,spread),
-    PF("space","Space",0,1,0.01f,space), PF("level","Level",0,1,0.01f,level),
+    PF("drive","Drive",0,1,0.01f,drive), PF("level","Level",0,1,0.01f,level),
+
+    PF("rev_mix","Reverb",0,1,0.01f,rev_mix), PF("rev_size","Rev Size",0,1,0.01f,rev_size),
+    PF("rev_damp","Rev Damp",0,1,0.01f,rev_damp), PF("dly_mix","Delay",0,1,0.01f,dly_mix),
+    PF("dly_time","Dly Time",0,1,0.01f,dly_time), PF("dly_fb","Dly Fbk",0,1,0.01f,dly_fb),
+    PF("dly_tone","Dly Tone",0,1,0.01f,dly_tone), PF("width","Width",0,1,0.01f,width),
 };
 static const int N_PDESC = (int)(sizeof(PDESC) / sizeof(PDESC[0]));
 
@@ -592,6 +627,17 @@ static inline int *pi_ptr(fizzik_t *inst, const pdesc_t *d) {
 static void apply_preset(fizzik_t *inst, int idx) {
     if (idx < 0) idx = 0; if (idx >= N_PRESETS) idx = N_PRESETS - 1;
     inst->p = PRESETS[idx];
+    if (inst->p.makeup < 1e-6f) inst->p.makeup = 1.0f;
+    /* FX aren't in the positional preset table — give them musical defaults
+     * (rev_mix comes from the preset's own value above). */
+    inst->p.drive    = 0.0f;
+    inst->p.rev_size = 0.55f;
+    inst->p.rev_damp = 0.40f;
+    inst->p.dly_mix  = 0.0f;
+    inst->p.dly_time = 0.38f;
+    inst->p.dly_fb   = 0.35f;
+    inst->p.dly_tone = 0.5f;
+    inst->p.width    = 0.5f;
     inst->preset_idx = idx;
 }
 
@@ -603,6 +649,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->rng = 0xC0FFEEu;
     apply_preset(inst, 2);   /* CaveStrings — pleasant default */
     inst->current_page = 0;
+    inst->dly_time_smooth = 16000.0f;
 
     for (int i = 0; i < MAX_VOICES; i++) {
         voice_t *v = &inst->v[i];
@@ -685,6 +732,7 @@ static void rnd_patch(fizzik_t *inst) {
     rnd_exciter(inst); rnd_reson(inst);
     inst->p.couple = randf(&inst->rng) * 0.7f;
     inst->p.balance = 0.35f + 0.3f * randf(&inst->rng);
+    inst->p.makeup = 1.0f;   /* rely on per-resonator auto-level */
 }
 
 /* Set one param field from a numeric string. */
@@ -709,7 +757,8 @@ static void set_param(void *instance, const char *key, const char *val) {
         else if (strcmp(val, "ResonA") == 0) inst->current_page = 1;
         else if (strcmp(val, "ResonB") == 0) inst->current_page = 2;
         else if (strcmp(val, "Voice")  == 0) inst->current_page = 3;
-        else if (strcmp(val, "Patch")  == 0) inst->current_page = 4;
+        else if (strcmp(val, "FX")     == 0) inst->current_page = 4;
+        else if (strcmp(val, "Patch")  == 0) inst->current_page = 5;
         return;
     }
 
@@ -786,6 +835,14 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
 
     if (strcmp(key, "name") == 0) return snprintf(buf, buf_len, "Fizzik");
 
+    /* Hidden calibration meter: "peak rms", resets on read. */
+    if (strcmp(key, "__meter") == 0) {
+        double rms = inst->meter_cnt ? sqrt(inst->meter_sumsq / (double)inst->meter_cnt) : 0.0;
+        int r = snprintf(buf, buf_len, "%.5f %.5f", inst->meter_peak, rms);
+        inst->meter_peak = 0.0f; inst->meter_sumsq = 0.0; inst->meter_cnt = 0;
+        return r;
+    }
+
     if (strcmp(key, "chain_params") == 0) {
         return snprintf(buf, buf_len,
           "["
@@ -819,8 +876,16 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"amp_attack\",\"name\":\"Amp Atk\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"amp_release\",\"name\":\"Amp Rel\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"spread\",\"name\":\"Spread\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"space\",\"name\":\"Space\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"drive\",\"name\":\"Drive\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"level\",\"name\":\"Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"rev_mix\",\"name\":\"Reverb\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"rev_size\",\"name\":\"Rev Size\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"rev_damp\",\"name\":\"Rev Damp\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"dly_mix\",\"name\":\"Delay\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"dly_time\",\"name\":\"Dly Time\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"dly_fb\",\"name\":\"Dly Fbk\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"dly_tone\",\"name\":\"Dly Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"width\",\"name\":\"Width\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\"]},"
           "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
           "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
@@ -832,11 +897,12 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         return snprintf(buf, buf_len,
           "{\"modes\":null,\"levels\":{"
           "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],"
-          "\"params\":[{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"Patch\",\"label\":\"Patch\"}]},"
+          "\"params\":[{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"Patch\",\"label\":\"Patch\"}]},"
           "\"Exciter\":{\"name\":\"Exciter\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],\"params\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"]},"
           "\"ResonA\":{\"name\":\"Reson A\",\"knobs\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"],\"params\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"]},"
           "\"ResonB\":{\"name\":\"Reson B\",\"knobs\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"],\"params\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"]},"
-          "\"Voice\":{\"name\":\"Voice\",\"knobs\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"space\",\"level\"],\"params\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"space\",\"level\"]},"
+          "\"Voice\":{\"name\":\"Voice\",\"knobs\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"drive\",\"level\"],\"params\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"drive\",\"level\"]},"
+          "\"FX\":{\"name\":\"FX\",\"knobs\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"],\"params\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"]},"
           "\"Patch\":{\"name\":\"Patch\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\"],\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\"]}"
           "}}");
     }
@@ -911,10 +977,20 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     float amp_rel_ms  = map_exp(p->amp_release, 20.0f, 3000.0f);
     float atk_inc     = 1.0f / (amp_atk_ms * 0.001f * SR);
     float rel_coef    = expf(-1.0f / (amp_rel_ms * 0.001f * SR));
-    float level_gain  = p->level * p->level * 1.4f;
-    float space_mix   = clampf(p->space, 0.0f, 1.0f);
-    float rev_fb      = 0.70f + 0.28f * space_mix;
-    float rev_damp    = 0.25f;
+    float level_gain  = p->level * p->level * 1.4f * p->makeup;
+    /* FX params. */
+    float rev_mix   = clampf(p->rev_mix, 0.0f, 1.0f);
+    float rev_fb    = 0.60f + 0.38f * clampf(p->rev_size, 0.0f, 1.0f);   /* 0.60..0.98 */
+    float rev_damp  = 0.05f + 0.60f * clampf(p->rev_damp, 0.0f, 1.0f);   /* 0.05..0.65 */
+    float dly_mix   = clampf(p->dly_mix, 0.0f, 1.0f);
+    float dly_fb    = clampf(p->dly_fb, 0.0f, 1.0f) * 0.85f;
+    float dly_cut   = map_exp(clampf(p->dly_tone, 0.0f, 1.0f), 800.0f, 12000.0f);
+    float dly_lpc   = 1.0f - expf(-TWO_PI * dly_cut * SR_INV);
+    float dly_target = clampf(map_exp(p->dly_time, 30.0f, 700.0f) * 0.001f * SR, 64.0f, (float)(DLY_MAX - 4));
+    float drive     = clampf(p->drive, 0.0f, 1.0f);
+    float drive_g   = 1.0f + drive * 4.0f;
+    float drive_cmp = 1.0f / (1.0f + drive * 1.2f);
+    float width     = clampf(p->width, 0.0f, 1.0f);
 
     /* Exciter param mapping. */
     float exc_mix    = clampf(p->exc_mix, 0.0f, 1.0f);
@@ -981,15 +1057,52 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             mixR += s * v->pan_r;
         }
 
-        /* Space reverb (mono send, stereo return). */
-        float wetL = 0.0f, wetR = 0.0f;
-        if (space_mix > 0.001f) {
-            float send = (mixL + mixR) * 0.5f;
-            wetL = reverb_ch(&inst->rvL, send, rev_fb, rev_damp);
-            wetR = reverb_ch(&inst->rvR, send, rev_fb, rev_damp);
+        /* Drive (soft saturation on the dry voice mix). */
+        if (drive > 0.001f) {
+            mixL = tanhf(mixL * drive_g) * drive_cmp;
+            mixR = tanhf(mixR * drive_g) * drive_cmp;
         }
-        float outL = (mixL + wetL * space_mix) * level_gain;
-        float outR = (mixR + wetR * space_mix) * level_gain;
+
+        /* Stereo ping-pong delay (always runs to keep the tail continuous). */
+        inst->dly_time_smooth += 0.0006f * (dly_target - inst->dly_time_smooth);
+        float rp = (float)inst->dly_pos - inst->dly_time_smooth;
+        while (rp < 0.0f) rp += DLY_MAX;
+        int di0 = (int)rp; float dfr = rp - (float)di0;
+        int di1 = di0 + 1; if (di1 >= DLY_MAX) di1 -= DLY_MAX;
+        float dwL = inst->dlyL[di0] + dfr * (inst->dlyL[di1] - inst->dlyL[di0]);
+        float dwR = inst->dlyR[di0] + dfr * (inst->dlyR[di1] - inst->dlyR[di0]);
+        inst->dly_lpL += dly_lpc * (dwL - inst->dly_lpL) + 1e-20f;
+        inst->dly_lpR += dly_lpc * (dwR - inst->dly_lpR) + 1e-20f;
+        inst->dlyL[inst->dly_pos] = mixL + inst->dly_lpR * dly_fb;   /* cross = ping-pong */
+        inst->dlyR[inst->dly_pos] = mixR + inst->dly_lpL * dly_fb;
+        inst->dly_pos++; if (inst->dly_pos >= DLY_MAX) inst->dly_pos = 0;
+        float sigL = mixL + dwL * dly_mix;
+        float sigR = mixR + dwR * dly_mix;
+
+        /* Reverb (mono send, stereo return). */
+        if (rev_mix > 0.001f) {
+            float send = (sigL + sigR) * 0.5f;
+            float wL = reverb_ch(&inst->rvL, send, rev_fb, rev_damp);
+            float wR = reverb_ch(&inst->rvR, send, rev_fb, rev_damp);
+            sigL += wL * rev_mix;
+            sigR += wR * rev_mix;
+        }
+
+        /* Stereo width (M/S). */
+        if (fabsf(width - 0.5f) > 0.001f) {
+            float mid = (sigL + sigR) * 0.5f;
+            float sid = (sigL - sigR) * 0.5f * (width * 2.0f);
+            sigL = mid + sid; sigR = mid - sid;
+        }
+
+        float outL = sigL * level_gain;
+        float outR = sigR * level_gain;
+
+        /* Hidden pre-clamp metering for offline calibration. */
+        float ap = fabsf(outL) > fabsf(outR) ? fabsf(outL) : fabsf(outR);
+        if (ap > inst->meter_peak) inst->meter_peak = ap;
+        inst->meter_sumsq += (double)outL * outL + (double)outR * outR;
+        inst->meter_cnt += 2;
 
         outL = soft_limit(outL);
         outR = soft_limit(outR);

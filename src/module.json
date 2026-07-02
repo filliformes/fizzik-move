@@ -24,6 +24,7 @@
             {"level": "ResonA", "label": "Reson A"},
             {"level": "ResonB", "label": "Reson B"},
             {"level": "Voice", "label": "Voice"},
+            {"level": "FX", "label": "FX"},
             {"level": "Patch", "label": "Patch"}
           ]
         },
@@ -44,8 +45,13 @@
         },
         "Voice": {
           "name": "Voice",
-          "knobs": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "space", "level"],
-          "params": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "space", "level"]
+          "knobs": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "drive", "level"],
+          "params": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "drive", "level"]
+        },
+        "FX": {
+          "name": "FX",
+          "knobs": ["rev_mix", "rev_size", "rev_damp", "dly_mix", "dly_time", "dly_fb", "dly_tone", "width"],
+          "params": ["rev_mix", "rev_size", "rev_damp", "dly_mix", "dly_time", "dly_fb", "dly_tone", "width"]
         },
         "Patch": {
           "name": "Patch",
@@ -88,8 +94,17 @@
       {"key": "amp_attack", "name": "Amp Atk", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "amp_release", "name": "Amp Rel", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "spread", "name": "Spread", "type": "float", "min": 0, "max": 1, "step": 0.01},
-      {"key": "space", "name": "Space", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "drive", "name": "Drive", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "level", "name": "Level", "type": "float", "min": 0, "max": 1, "step": 0.01},
+
+      {"key": "rev_mix", "name": "Reverb", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "rev_size", "name": "Rev Size", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "rev_damp", "name": "Rev Damp", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "dly_mix", "name": "Delay", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "dly_time", "name": "Dly Time", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "dly_fb", "name": "Dly Fbk", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "dly_tone", "name": "Dly Tone", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "width", "name": "Width", "type": "float", "min": 0, "max": 1, "step": 0.01},
 
       {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle"]},
       {"key": "rnd_patch", "name": "Rnd Patch", "type": "int", "min": 0, "max": 127, "step": 1},
