@@ -1004,11 +1004,17 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
 
 static void rnd_exciter(fizzik_t *inst) {
     uint32_t *s = &inst->rng;
-    /* Bold ranges so the change is clearly audible on the next note's attack. */
-    inst->p.exc_mix = randf(s); inst->p.exc_crackle = randf(s) * randf(s);   /* skew low, occasional lots */
-    inst->p.exc_color = 0.15f + 0.6f * randf(s); inst->p.exc_attack = randf(s) * randf(s) * 0.7f;  /* not too bright */
-    inst->p.exc_decay = 0.05f + 0.9f * randf(s); inst->p.exc_reso = randf(s) * 0.6f;
-    inst->p.vel_level = randf(s); inst->p.vel_color = randf(s);
+    /* Constrained so the burst always injects adequate energy (a weak exciter =
+     * quiet patch regardless of makeup): short attack that actually reaches full,
+     * moderate+ decay, not-too-dark color, moderate mix. Keeps variety, kills the
+     * near-silent outliers. */
+    inst->p.exc_mix    = 0.15f + 0.7f * randf(s);          /* 0.15..0.85 */
+    inst->p.exc_crackle = randf(s) * randf(s) * 0.6f;      /* occasional, low */
+    inst->p.exc_color  = 0.35f + 0.5f * randf(s);          /* 0.35..0.85: not too dark */
+    inst->p.exc_attack = randf(s) * randf(s) * 0.3f;       /* short: reaches full amplitude */
+    inst->p.exc_decay  = 0.35f + 0.5f * randf(s);          /* 0.35..0.85: enough energy */
+    inst->p.exc_reso   = randf(s) * 0.5f;
+    inst->p.vel_level  = randf(s) * 0.6f; inst->p.vel_color = randf(s) * 0.6f;
 }
 static void rnd_one_reso(fizzik_t *inst, int isB) {
     uint32_t *s = &inst->rng;
@@ -1019,9 +1025,11 @@ static void rnd_one_reso(fizzik_t *inst, int isB) {
      * octave above the played note. */
     float str = randf(s) * randf(s) * 0.7f;              /* skew low: 0..0.7, mostly < 0.35 */
     if (mdl == MODEL_BEAM) str *= 0.5f;                  /* beam's n^2 partials get screechy fast */
-    float dec = 0.3f + 0.4f * randf(s);                  /* 0.30..0.70: limit loud long rings */
-    float dmp = 0.55f + 0.35f * randf(s);                /* 0.55..0.90: solid HF damping */
-    float pos = 0.2f + 0.6f * randf(s);
+    float dec = 0.52f + 0.28f * randf(s);                /* 0.52..0.80: sustained -> consistent loudness */
+    float dmp = 0.25f + 0.4f * randf(s);                 /* 0.25..0.65: enough ring to stay audible
+                                                          * (high damp = near-silent; screech is held
+                                                          * off by the tone<=0.5 / tune<=0 caps). */
+    float pos = 0.12f + 0.33f * randf(s);                /* 0.12..0.45: high pos combs to silence */
     float tone = 0.2f + 0.3f * randf(s);                 /* 0.20..0.50: never piercing */
     int tune = (int)(randf(s) * 13.0f) - 12;             /* -12..0: never above the played note */
     float tens = (mdl <= MODEL_BEAM) ? randf(s) * 0.35f : 0.0f;
@@ -1036,8 +1044,9 @@ static void rnd_patch(fizzik_t *inst) {
     inst->p.couple = randf(&inst->rng) * 0.45f;          /* keep coupling from self-oscillating */
     inst->p.balance = 0.35f + 0.3f * randf(&inst->rng);
     /* Random patches read hot, worst with high coupling (feedback reinforces both
-     * resonators). Scale makeup down with the coupling amount to flatten the loud tail. */
-    inst->p.makeup = 0.62f - inst->p.couple * 0.6f;      /* couple 0->0.62, 0.45->0.35 */
+     * resonators). Scale makeup down with the coupling amount to flatten the loud
+     * tail, but keep a floor so nothing comes out too quiet (volume consistency). */
+    inst->p.makeup = 1.7f - inst->p.couple * 1.0f;       /* louder mean; limiter caps the loud tail */
 }
 
 /* Rnd All — randomize EVERYTHING: voice + per-voice FX + global filter + LFOs +
@@ -1056,9 +1065,11 @@ static void rnd_all(fizzik_t *inst) {
     inst->p.dly_tone = randf(s);
     inst->p.drive    = randf(s) * randf(s) * 0.5f;       /* mild */
     inst->p.width    = 0.3f + 0.5f * randf(s);
-    inst->p.flt_cutoff  = 0.45f + 0.55f * randf(s);
+    inst->p.flt_cutoff  = 0.5f + 0.5f * randf(s);
     inst->p.flt_reso    = randf(s) * randf(s) * 0.5f;    /* low: avoid self-osc screech */
-    inst->p.flt_type    = rnd_i(s, N_FTYPE);
+    /* Filter type weighted LP-heavy: HP thins/quiets the sound, so make it rare. */
+    { float fr = randf(s);
+      inst->p.flt_type = (fr < 0.55f) ? 0 : (fr < 0.80f) ? 2 : (fr < 0.93f) ? 3 : 1; }  /* 55% LP,25% BP,13% Notch,7% HP */
     inst->p.flt_voicing = rnd_i(s, N_VOICING);
     inst->p.lfo1_rate = randf(s) * 0.5f; inst->p.lfo1_depth = randf(s) * randf(s) * 0.5f;
     inst->p.lfo1_shape = rnd_i(s, N_LFO_SHAPE); inst->p.lfo1_target = rnd_i(s, N_LFO_TGT);
@@ -1073,7 +1084,14 @@ static void rnd_all(fizzik_t *inst) {
 /* Request a randomize: fade out first (render applies it while silent, then fades
  * back in) so the abrupt parameter/model change is never audible as a click.
  * which: 1=patch, 2=exciter, 3=reson, 4=all. */
-static void trigger_rnd(fizzik_t *inst, int which) { inst->pending_rnd = which; inst->rnd_phase = 1; }
+static void trigger_rnd(fizzik_t *inst, int which) {
+    /* Speed filter: ignore re-fires while a crossfade is already running. Turning
+     * the knob fast jumps many numbers -> many fires; without this the duck keeps
+     * restarting and re-gates the output (the "click"). One randomize per ~110ms
+     * crossfade; slow +/-1 turns each still fire cleanly. */
+    if (inst->rnd_phase != 0) return;
+    inst->pending_rnd = which; inst->rnd_phase = 1;
+}
 /* Clear each voice's cross-coupling feedback + DC-blocker so the newly-tuned
  * resonators don't get a transient kick from the old loop state (a click source
  * that survives the output fade). Only for resonator-changing randomizes. */
