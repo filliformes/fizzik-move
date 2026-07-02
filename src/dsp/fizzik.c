@@ -1000,18 +1000,26 @@ static void rnd_exciter(fizzik_t *inst) {
     uint32_t *s = &inst->rng;
     /* Bold ranges so the change is clearly audible on the next note's attack. */
     inst->p.exc_mix = randf(s); inst->p.exc_crackle = randf(s) * randf(s);   /* skew low, occasional lots */
-    inst->p.exc_color = 0.15f + 0.85f * randf(s); inst->p.exc_attack = randf(s) * randf(s) * 0.7f;
-    inst->p.exc_decay = 0.05f + 0.9f * randf(s); inst->p.exc_reso = randf(s) * 0.8f;
+    inst->p.exc_color = 0.15f + 0.6f * randf(s); inst->p.exc_attack = randf(s) * randf(s) * 0.7f;  /* not too bright */
+    inst->p.exc_decay = 0.05f + 0.9f * randf(s); inst->p.exc_reso = randf(s) * 0.6f;
     inst->p.vel_level = randf(s); inst->p.vel_color = randf(s);
     rnd_duck(inst);
 }
 static void rnd_one_reso(fizzik_t *inst, int isB) {
     uint32_t *s = &inst->rng;
     int mdl = (int)(randf(s) * 4.0f); if (mdl > 3) mdl = 3;
-    float str = randf(s), dec = 0.4f + 0.55f * randf(s), dmp = 0.3f + 0.5f * randf(s);
-    float pos = 0.2f + 0.6f * randf(s), tone = 0.3f + 0.6f * randf(s);
-    int tune = (int)(randbi(s) * 12.0f);
-    float tens = (mdl <= MODEL_BEAM) ? randf(s) * 0.5f : 0.0f;
+    /* Tuned to avoid screechy, high-pitched results: cap structure (no extreme
+     * inharmonic/dense high modes), keep a damping floor (HF actually decays),
+     * modest decay, darker tone, and bias tune DOWN so resonators never ring an
+     * octave above the played note. */
+    float str = randf(s) * randf(s) * 0.7f;              /* skew low: 0..0.7, mostly < 0.35 */
+    if (mdl == MODEL_BEAM) str *= 0.5f;                  /* beam's n^2 partials get screechy fast */
+    float dec = 0.35f + 0.45f * randf(s);                /* 0.35..0.80 */
+    float dmp = 0.55f + 0.35f * randf(s);                /* 0.55..0.90: solid HF damping */
+    float pos = 0.2f + 0.6f * randf(s);
+    float tone = 0.2f + 0.3f * randf(s);                 /* 0.20..0.50: never piercing */
+    int tune = (int)(randf(s) * 13.0f) - 12;             /* -12..0: never above the played note */
+    float tens = (mdl <= MODEL_BEAM) ? randf(s) * 0.35f : 0.0f;
     if (!isB) { inst->p.a_model=mdl; inst->p.a_struct=str; inst->p.a_decay=dec; inst->p.a_damp=dmp;
                 inst->p.a_pos=pos; inst->p.a_tone=tone; inst->p.a_tune=tune; inst->p.a_tension=tens; }
     else      { inst->p.b_model=mdl; inst->p.b_struct=str; inst->p.b_decay=dec; inst->p.b_damp=dmp;
@@ -1020,7 +1028,7 @@ static void rnd_one_reso(fizzik_t *inst, int isB) {
 static void rnd_reson(fizzik_t *inst) { rnd_one_reso(inst, 0); rnd_one_reso(inst, 1); rnd_duck(inst); }
 static void rnd_patch(fizzik_t *inst) {
     rnd_exciter(inst); rnd_reson(inst);
-    inst->p.couple = randf(&inst->rng) * 0.7f;
+    inst->p.couple = randf(&inst->rng) * 0.45f;          /* keep coupling from self-oscillating */
     inst->p.balance = 0.35f + 0.3f * randf(&inst->rng);
     inst->p.makeup = 1.0f;   /* rely on per-resonator auto-level */
     rnd_duck(inst);
