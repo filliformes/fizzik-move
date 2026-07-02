@@ -78,7 +78,7 @@ static const char *PRESET_NAMES[N_PRESETS] = {
 
 /* Page-aware knob overlay: keys per page (index = current_page). */
 static const char *PAGE_KEYS[9][8] = {
-    { "preset","rnd_patch","rnd_exc","rnd_reson","cutoff","resonance","ftype","voicing" },
+    { "preset","rnd_patch","rnd_exc","rnd_reson","rnd_all","cutoff","resonance","ftype" },
     { "exc_mix","exc_crackle","exc_color","exc_attack","exc_decay","exc_reso","vel_level","vel_color" },
     { "a_model","a_struct","a_decay","a_damp","a_pos","a_tone","a_tune","a_tension" },
     { "b_model","b_struct","b_decay","b_damp","b_pos","b_tone","b_tune","b_tension" },
@@ -120,6 +120,10 @@ static inline float randf(uint32_t *s) {
     return (float)(x & 0x00FFFFFF) / (float)0x01000000;
 }
 static inline float randbi(uint32_t *s) { return randf(s) * 2.0f - 1.0f; }
+static inline int   rnd_i(uint32_t *s, int count) {   /* bounded 0..count-1 */
+    int v = (int)(randf(s) * (float)count);
+    return v < 0 ? 0 : (v >= count ? count - 1 : v);
+}
 
 /* ── Biquad (one modal mode, RBJ constant 0 dB band-pass) ────────────────────── */
 
@@ -629,13 +633,14 @@ static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
 
     /* SVF-family voicings: Clean(0) SEM(1) MS-20(2) Steiner(3) Sallen-Key(10). */
     if (voicing==0 || voicing==1 || voicing==2 || voicing==3 || voicing==10) {
-        float kmin, krange, drive = 1.0f;
+        float kmin, krange, drive = 1.0f, trim;
+        /* trim: level-match to the ladder family (which is quieter due to input drive). */
         switch (voicing) {
-            case 1:  kmin=0.20f; krange=1.65f; break;               /* SEM: soft res  */
-            case 2:  kmin=0.030f; krange=1.97f; drive=1.8f; break;  /* MS-20: scream  */
-            case 3:  kmin=0.10f; krange=1.85f; drive=1.2f; break;   /* Steiner        */
-            case 10: kmin=0.050f; krange=1.90f; drive=1.5f; break;  /* Sallen-Key K35 */
-            default: kmin=0.060f; krange=1.94f; break;              /* Clean          */
+            case 1:  kmin=0.20f; krange=1.65f; trim=0.68f; break;              /* SEM: soft res  */
+            case 2:  kmin=0.030f; krange=1.97f; drive=1.8f; trim=0.82f; break; /* MS-20: scream  */
+            case 3:  kmin=0.10f; krange=1.85f; drive=1.2f; trim=0.75f; break;  /* Steiner        */
+            case 10: kmin=0.050f; krange=1.90f; drive=1.5f; trim=0.78f; break; /* Sallen-Key K35 */
+            default: kmin=0.060f; krange=1.94f; trim=0.68f; break;             /* Clean          */
         }
         float k = kmin + krange * (1.0f - reso);      /* reso up -> k down -> more Q */
         float a1 = 1.0f / (1.0f + g * (g + k));
@@ -654,7 +659,7 @@ static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
             band = ftanh(band * 1.4f);
             hp   = ftanh(hp * 1.2f);
         }
-        switch (type) { case 0: return lp; case 1: return hp; case 2: return band; default: return notch; }
+        switch (type) { case 0: return lp*trim; case 1: return hp*trim; case 2: return band*trim; default: return notch*trim; }
     }
 
     /* Ladder-family voicings (ZDF, tanh feedback -> bounded self-oscillation). */
@@ -915,7 +920,10 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->p.lfo2_rate = 0.2f; inst->p.lfo2_depth = 0.0f; inst->p.lfo2_shape = 1; inst->p.lfo2_target = 0;
     inst->p.eq_tone = 0.5f; inst->p.eq_body = 0.5f;
     inst->p.cho_mix = 0.0f; inst->p.cho_rate = 0.35f; inst->p.cho_depth = 0.4f;
-    inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.92f;
+    /* Hearing safety: default the brickwall limiter to a low ceiling (~0.67
+     * linear, about -3.5 dB) so the synth can't get ear-splitting on headphones,
+     * even at high resonance / screechy patches. User can raise it if they want. */
+    inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.35f;
     inst->lim_gain = 1.0f;
     inst->rnd_gain = 1.0f;   /* rnd_phase / pending_rnd = 0 (idle) from calloc */
     inst->lfo1.rng = 0x9E3779B9u; inst->lfo2.rng = 0x85EBCA6Bu;
@@ -1032,14 +1040,45 @@ static void rnd_patch(fizzik_t *inst) {
     inst->p.makeup = 0.62f - inst->p.couple * 0.6f;      /* couple 0->0.62, 0.45->0.35 */
 }
 
+/* Rnd All — randomize EVERYTHING: voice + per-voice FX + global filter + LFOs +
+ * aftertouch + master EQ/chorus/comp. The output LIMITER is deliberately left at
+ * its safe setting (never randomized) for hearing safety; resonance/drive are
+ * skewed low to avoid screech. */
+static void rnd_all(fizzik_t *inst) {
+    uint32_t *s = &inst->rng;
+    rnd_patch(inst);                                     /* voice (+ makeup) */
+    inst->p.rev_mix  = randf(s) * randf(s);
+    inst->p.rev_size = 0.3f + 0.5f * randf(s);
+    inst->p.rev_damp = 0.3f + 0.5f * randf(s);
+    inst->p.dly_mix  = randf(s) * randf(s) * 0.7f;
+    inst->p.dly_time = randf(s);
+    inst->p.dly_fb   = randf(s) * 0.6f;
+    inst->p.dly_tone = randf(s);
+    inst->p.drive    = randf(s) * randf(s) * 0.5f;       /* mild */
+    inst->p.width    = 0.3f + 0.5f * randf(s);
+    inst->p.flt_cutoff  = 0.45f + 0.55f * randf(s);
+    inst->p.flt_reso    = randf(s) * randf(s) * 0.5f;    /* low: avoid self-osc screech */
+    inst->p.flt_type    = rnd_i(s, N_FTYPE);
+    inst->p.flt_voicing = rnd_i(s, N_VOICING);
+    inst->p.lfo1_rate = randf(s) * 0.5f; inst->p.lfo1_depth = randf(s) * randf(s) * 0.5f;
+    inst->p.lfo1_shape = rnd_i(s, N_LFO_SHAPE); inst->p.lfo1_target = rnd_i(s, N_LFO_TGT);
+    inst->p.lfo2_rate = randf(s) * 0.4f; inst->p.lfo2_depth = randf(s) * randf(s) * 0.4f;
+    inst->p.lfo2_shape = rnd_i(s, N_LFO_SHAPE); inst->p.lfo2_target = rnd_i(s, N_LFO_TGT);
+    apply_at_preset(inst, rnd_i(s, N_AT_PRESET));
+    inst->p.eq_tone = 0.35f + 0.3f * randf(s); inst->p.eq_body = 0.35f + 0.3f * randf(s);
+    inst->p.cho_mix = randf(s) * randf(s); inst->p.cho_rate = randf(s); inst->p.cho_depth = randf(s);
+    inst->p.comp_amt = randf(s) * 0.5f;
+}
+
 /* Request a randomize: fade out first (render applies it while silent, then fades
  * back in) so the abrupt parameter/model change is never audible as a click.
- * which: 1=patch, 2=exciter, 3=reson. */
+ * which: 1=patch, 2=exciter, 3=reson, 4=all. */
 static void trigger_rnd(fizzik_t *inst, int which) { inst->pending_rnd = which; inst->rnd_phase = 1; }
 static void apply_pending_rnd(fizzik_t *inst) {
     if      (inst->pending_rnd == 1) rnd_patch(inst);
     else if (inst->pending_rnd == 2) rnd_exciter(inst);
     else if (inst->pending_rnd == 3) rnd_reson(inst);
+    else if (inst->pending_rnd == 4) rnd_all(inst);
     inst->pending_rnd = 0;
 }
 
@@ -1097,7 +1136,8 @@ static void set_param(void *instance, const char *key, const char *val) {
         if (strncmp(pk, "rnd_", 4) == 0) {
             if (delta != 0) { if (!strcmp(pk,"rnd_patch")) trigger_rnd(inst,1);
                               else if (!strcmp(pk,"rnd_exc")) trigger_rnd(inst,2);
-                              else if (!strcmp(pk,"rnd_reson")) trigger_rnd(inst,3); }
+                              else if (!strcmp(pk,"rnd_reson")) trigger_rnd(inst,3);
+                              else if (!strcmp(pk,"rnd_all")) trigger_rnd(inst,4); }
             return;
         }
         const pdesc_t *d = find_pdesc(pk);
@@ -1119,6 +1159,7 @@ static void set_param(void *instance, const char *key, const char *val) {
             if (!strcmp(key,"rnd_patch")) trigger_rnd(inst,1);
             else if (!strcmp(key,"rnd_exc")) trigger_rnd(inst,2);
             else if (!strcmp(key,"rnd_reson")) trigger_rnd(inst,3);
+            else if (!strcmp(key,"rnd_all")) trigger_rnd(inst,4);
         }
         return;
     }
@@ -1249,14 +1290,15 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\"]},"
           "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
           "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
-          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1}"
+          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
+          "{\"key\":\"rnd_all\",\"name\":\"Rnd All\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1}"
           "]");
     }
 
     if (strcmp(key, "ui_hierarchy") == 0) {
         return snprintf(buf, buf_len,
           "{\"modes\":null,\"levels\":{"
-          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],"
+          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"rnd_all\",\"cutoff\",\"resonance\",\"ftype\"],"
           "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"FX2\",\"label\":\"FX 2\"},{\"level\":\"Mod\",\"label\":\"Mod\"},{\"level\":\"Touch\",\"label\":\"Aftertouch\"}]},"
           "\"Exciter\":{\"name\":\"Exciter\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],\"params\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"]},"
           "\"ResonA\":{\"name\":\"Reson A\",\"knobs\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"],\"params\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"]},"
@@ -1266,7 +1308,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "\"FX2\":{\"name\":\"FX 2\",\"knobs\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"],\"params\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"]},"
           "\"Mod\":{\"name\":\"Mod\",\"knobs\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"],\"params\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"]},"
           "\"Touch\":{\"name\":\"Aftertouch\",\"knobs\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"],\"params\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"]},"
-          "\"Patch\":{\"name\":\"Patch\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"]}"
+          "\"Patch\":{\"name\":\"Patch\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"rnd_all\",\"cutoff\",\"resonance\",\"ftype\"],\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"rnd_all\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"]}"
           "}}");
     }
 
@@ -1279,6 +1321,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(pk, "rnd_patch") == 0) return snprintf(buf, buf_len, "Rnd Patch");
         if (strcmp(pk, "rnd_exc") == 0) return snprintf(buf, buf_len, "Rnd Exc");
         if (strcmp(pk, "rnd_reson") == 0) return snprintf(buf, buf_len, "Rnd Reson");
+        if (strcmp(pk, "rnd_all") == 0) return snprintf(buf, buf_len, "Rnd All");
         const pdesc_t *d = find_pdesc(pk);
         return snprintf(buf, buf_len, "%s", d ? d->name : pk);
     }

@@ -18,7 +18,7 @@
       "levels": {
         "root": {
           "name": "Fizzik",
-          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "cutoff", "resonance", "ftype", "voicing"],
+          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype"],
           "params": [
             {"level": "Patch", "label": "Patch"},
             {"level": "Exciter", "label": "Exciter"},
@@ -73,8 +73,8 @@
         },
         "Patch": {
           "name": "Patch",
-          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "cutoff", "resonance", "ftype", "voicing"],
-          "params": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "cutoff", "resonance", "ftype", "voicing"]
+          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype"],
+          "params": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype", "voicing"]
         }
       }
     },
@@ -159,7 +159,8 @@
       {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle", "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad", "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum", "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine"]},
       {"key": "rnd_patch", "name": "Rnd Patch", "type": "int", "min": 0, "max": 127, "step": 1},
       {"key": "rnd_exc", "name": "Rnd Exciter", "type": "int", "min": 0, "max": 127, "step": 1},
-      {"key": "rnd_reson", "name": "Rnd Reson", "type": "int", "min": 0, "max": 127, "step": 1}
+      {"key": "rnd_reson", "name": "Rnd Reson", "type": "int", "min": 0, "max": 127, "step": 1},
+      {"key": "rnd_all", "name": "Rnd All", "type": "int", "min": 0, "max": 127, "step": 1}
     ]
   }
 }
