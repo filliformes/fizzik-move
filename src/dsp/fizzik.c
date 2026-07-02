@@ -593,10 +593,15 @@ static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
         float v2 = f->ic2 + a2 * f->ic1 + a3 * v3;
         f->ic1 = 2.0f * v1 - f->ic1 + 1e-20f;
         f->ic2 = 2.0f * v2 - f->ic2;
-        float bp = v1, lp = v2;
-        if (voicing==2 || voicing==10) bp = ftanh(bp * 1.6f);   /* clipped resonance */
-        float hp = xin - k * bp - lp, notch = xin - k * bp;
-        switch (type) { case 0: return lp; case 1: return hp; case 2: return bp * k; default: return notch; }
+        float lp = v2;
+        float band = k * v1;                    /* unity-peak bandpass (Q-independent) */
+        float hp = xin - k * v1 - lp;
+        float notch = xin - k * v1;
+        if (voicing==2 || voicing==10) {        /* MS-20 / K35 diode-clipped resonance */
+            band = ftanh(band * 1.4f);
+            hp   = ftanh(hp * 1.2f);
+        }
+        switch (type) { case 0: return lp; case 1: return hp; case 2: return band; default: return notch; }
     }
 
     /* Ladder-family voicings (ZDF, tanh feedback -> bounded self-oscillation). */
