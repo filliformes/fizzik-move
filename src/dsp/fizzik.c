@@ -61,14 +61,14 @@ static const char *PRESET_NAMES[N_PRESETS] = {
 
 /* Page-aware knob overlay: keys per page (index = current_page). */
 static const char *PAGE_KEYS[6][8] = {
-    { "preset","rnd_patch","rnd_exc","rnd_reson","","","","" },
+    { "preset","rnd_patch","rnd_exc","rnd_reson","cutoff","resonance","ftype","voicing" },
     { "exc_mix","exc_crackle","exc_color","exc_attack","exc_decay","exc_reso","vel_level","vel_color" },
     { "a_model","a_struct","a_decay","a_damp","a_pos","a_tone","a_tune","a_tension" },
     { "b_model","b_struct","b_decay","b_damp","b_pos","b_tone","b_tune","b_tension" },
     { "couple","balance","glide","amp_attack","amp_release","spread","drive","level" },
     { "rev_mix","rev_size","rev_damp","dly_mix","dly_time","dly_fb","dly_tone","width" }
 };
-static const int PAGE_NKNOBS[6] = { 4, 8, 8, 8, 8, 8 };
+static const int PAGE_NKNOBS[6] = { 8, 8, 8, 8, 8, 8 };
 
 /* ── Small helpers ───────────────────────────────────────────────────────────── */
 
@@ -500,6 +500,8 @@ typedef struct {
     float makeup;   /* per-preset level compensation (not a knob) */
     /* FX extras (defaulted in apply_preset; zero-filled by the preset table). */
     float drive, rev_size, rev_damp, dly_mix, dly_time, dly_fb, dly_tone, width;
+    /* Global filter (preserved across preset loads; see apply_preset). */
+    float flt_cutoff, flt_reso; int flt_type, flt_voicing;
 } params_t;
 
 /* ── Simple stereo Schroeder reverb (Space) ──────────────────────────────────── */
@@ -539,6 +541,102 @@ static float reverb_ch(reverb_ch_t *r, float x, float fb, float damp) {
     return acc;
 }
 
+/* ── Global multimode filter ─────────────────────────────────────────────────── */
+/* Clean-room from public VA-filter math: A. Simper's Cytomic trapezoidal SVF and
+ * V. Zavalishin's ZDF transistor ladder ("The Art of VA Filter Design"). Two
+ * engines, 12 voicings, LP/HP/BP/Notch. Self-oscillating, stable at 44.1k. */
+
+#define N_FTYPE   4
+#define N_VOICING 12
+static const char *FTYPE_NAMES[N_FTYPE] = { "LP", "HP", "BP", "Notch" };
+static const char *VOICING_NAMES[N_VOICING] = {
+    "Clean SVF", "SEM", "MS-20", "Steiner", "Ladder 4P", "Ladder 2P",
+    "Ladder 1P", "Prophet", "Oberheim", "Diode", "Sallen-Key", "Vintage"
+};
+
+typedef struct {
+    float ic1, ic2;         /* Cytomic SVF integrator state */
+    float z1, z2, z3, z4;   /* ZDF ladder one-pole states */
+} filter_ch_t;
+
+static inline void filter_reset(filter_ch_t *f) { f->ic1=f->ic2=f->z1=f->z2=f->z3=f->z4=0.0f; }
+
+/* Bounded Padé tanh for filter drive / feedback saturation. */
+static inline float ftanh(float x) {
+    if (x < -3.0f) return -1.0f;
+    if (x >  3.0f) return  1.0f;
+    float x2 = x * x;
+    return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+}
+
+/* One channel, one sample. g = tan(pi*fc/SR) (precomputed per block). */
+static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
+                                   int type, int voicing) {
+    reso = clampf(reso, 0.0f, 1.0f);
+
+    /* SVF-family voicings: Clean(0) SEM(1) MS-20(2) Steiner(3) Sallen-Key(10). */
+    if (voicing==0 || voicing==1 || voicing==2 || voicing==3 || voicing==10) {
+        float kmin, krange, drive = 1.0f;
+        switch (voicing) {
+            case 1:  kmin=0.20f; krange=1.65f; break;               /* SEM: soft res  */
+            case 2:  kmin=0.030f; krange=1.97f; drive=1.8f; break;  /* MS-20: scream  */
+            case 3:  kmin=0.10f; krange=1.85f; drive=1.2f; break;   /* Steiner        */
+            case 10: kmin=0.050f; krange=1.90f; drive=1.5f; break;  /* Sallen-Key K35 */
+            default: kmin=0.060f; krange=1.94f; break;              /* Clean          */
+        }
+        float k = kmin + krange * (1.0f - reso);      /* reso up -> k down -> more Q */
+        float a1 = 1.0f / (1.0f + g * (g + k));
+        float a2 = g * a1, a3 = g * a2;
+        float xin = (drive > 1.01f) ? ftanh(x * drive) * (1.0f / drive) : x;
+        float v3 = xin - f->ic2;
+        float v1 = a1 * f->ic1 + a2 * v3;
+        float v2 = f->ic2 + a2 * f->ic1 + a3 * v3;
+        f->ic1 = 2.0f * v1 - f->ic1 + 1e-20f;
+        f->ic2 = 2.0f * v2 - f->ic2;
+        float bp = v1, lp = v2;
+        if (voicing==2 || voicing==10) bp = ftanh(bp * 1.6f);   /* clipped resonance */
+        float hp = xin - k * bp - lp, notch = xin - k * bp;
+        switch (type) { case 0: return lp; case 1: return hp; case 2: return bp * k; default: return notch; }
+    }
+
+    /* Ladder-family voicings (ZDF, tanh feedback -> bounded self-oscillation). */
+    float G = g / (1.0f + g);
+    int poles; float kmax, drive;
+    switch (voicing) {
+        case 5:  poles=2; kmax=3.6f; drive=1.2f;  break;   /* Ladder 2-pole */
+        case 6:  poles=1; kmax=2.6f; drive=1.1f;  break;   /* Ladder 1-pole */
+        case 7:  poles=4; kmax=3.8f; drive=1.05f; break;   /* Prophet (SSM) */
+        case 8:  poles=4; kmax=4.0f; drive=1.15f; break;   /* Oberheim      */
+        case 9:  poles=4; kmax=4.3f; drive=1.7f;  break;   /* Diode / 303   */
+        case 11: poles=4; kmax=4.0f; drive=2.4f;  break;   /* Vintage       */
+        default: poles=4; kmax=4.0f; drive=1.3f;  break;   /* Ladder 4-pole */
+    }
+    float k = kmax * reso;
+    float xin = (drive > 1.01f) ? ftanh(x * drive) * (1.0f / drive) : x;
+    float G2 = G*G, G3 = G2*G, G4 = G3*G;
+    float S1 = f->z1*(1.0f-G), S2 = f->z2*(1.0f-G), S3 = f->z3*(1.0f-G), S4 = f->z4*(1.0f-G);
+    float Sigma = G3*S1 + G2*S2 + G*S3 + S4;
+    float y4lin = (G4 * xin + Sigma) / (1.0f + k * G4);
+    float u = xin - k * ftanh(y4lin);              /* saturated feedback = stable self-osc */
+    /* cascade of TPT one-poles with input u */
+    float v, y1, y2, y3, y4;
+    v = (u  - f->z1) * G; y1 = v + f->z1; f->z1 = y1 + v + 1e-20f;
+    v = (y1 - f->z2) * G; y2 = v + f->z2; f->z2 = y2 + v;
+    v = (y2 - f->z3) * G; y3 = v + f->z3; f->z3 = y3 + v;
+    v = (y3 - f->z4) * G; y4 = v + f->z4; f->z4 = y4 + v;
+
+    float lp = (poles==1) ? y1 : (poles==2) ? y2 : y4;
+    float hp = (poles<=2) ? (u - 2.0f*y1 + y2) : (u - 4.0f*y1 + 6.0f*y2 - 4.0f*y3 + y4);
+    float bp = (poles<=2) ? (2.0f*(y1 - y2)) : (4.0f*(y2 - 2.0f*y3 + y4));
+    float comp = 1.0f + 0.5f * k;                  /* restore level lost to resonance */
+    switch (type) {
+        case 0: return lp * comp;
+        case 1: return hp;
+        case 2: return bp;
+        default: return u - bp;                    /* notch */
+    }
+}
+
 /* ── Instance ────────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -554,6 +652,8 @@ typedef struct {
     int      dly_pos;
     float    dly_lpL, dly_lpR;
     float    dly_time_smooth;
+    filter_ch_t fltL, fltR;         /* global multimode filter (post-synth, pre-FX) */
+    params_t sm;                    /* 20 ms-smoothed shadow of p (analog-style) */
     int      any_held;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
@@ -565,36 +665,36 @@ typedef struct {
     bMdl,bStr,bDec,bDmp,bPos,bTone,bTune,bTens,
     couple,balance,glide,ampA,ampR,spread,space,level, makeup} — makeup baked from offline meter (peak->0.8) */
 static const params_t PRESETS[N_PRESETS] = {
-  /* AlienChurch */    {0.2f,0.1f,0.7f,0.05f,0.4f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.9f,0.5f,0.5f,0.7f,0,0.0f, MODEL_PLATE,0.4f,0.85f,0.4f,0.4f,0.6f,7,0.0f, 0.35f,0.5f,0.2f,0.3f,0.7f,0.6f,0.6f,0.6f, 0.323f},
-  /* BowedGlass */     {0.0f,0.0f,0.5f,0.4f,0.6f,0.2f,0.2f,0.3f, MODEL_PLATE,0.3f,0.95f,0.6f,0.4f,0.6f,0,0.0f, MODEL_PLATE,0.5f,0.9f,0.5f,0.5f,0.7f,12,0.0f, 0.5f,0.5f,0.1f,0.5f,0.6f,0.5f,0.5f,0.55f, 0.779f},
-  /* CaveStrings */    {0.1f,0.05f,0.6f,0.1f,0.5f,0.4f,0.4f,0.3f, MODEL_STRING,0.2f,0.85f,0.4f,0.15f,0.6f,0,0.2f, MODEL_STRING,0.1f,0.8f,0.5f,0.25f,0.55f,-12,0.15f, 0.3f,0.5f,0.15f,0.05f,0.5f,0.6f,0.7f,0.6f, 1.048f},
-  /* CouncilsPiano */  {0.6f,0.0f,0.75f,0.01f,0.15f,0.2f,0.6f,0.5f, MODEL_STRING,0.35f,0.75f,0.6f,0.2f,0.7f,0,0.25f, MODEL_BEAM,0.15f,0.7f,0.6f,0.5f,0.65f,12,0.0f, 0.15f,0.35f,0.0f,0.02f,0.4f,0.4f,0.35f,0.6f, 2.172f},
-  /* DistortedBass */  {0.4f,0.2f,0.4f,0.01f,0.2f,0.6f,0.7f,0.4f, MODEL_STRING,0.0f,0.7f,0.3f,0.3f,0.4f,-12,0.6f, MODEL_STRING,0.05f,0.65f,0.4f,0.35f,0.35f,-12,0.7f, 0.55f,0.5f,0.05f,0.02f,0.35f,0.3f,0.2f,0.7f, 1.755f},
-  /* FeedbackHarp */   {0.2f,0.1f,0.65f,0.02f,0.25f,0.5f,0.5f,0.5f, MODEL_STRING,0.15f,0.92f,0.5f,0.4f,0.7f,0,0.3f, MODEL_STRING,0.2f,0.9f,0.55f,0.6f,0.6f,7,0.35f, 0.62f,0.5f,0.1f,0.03f,0.5f,0.55f,0.5f,0.55f, 2.271f},
-  /* JudgementAwaits */{0.15f,0.15f,0.55f,0.08f,0.5f,0.35f,0.3f,0.4f, MODEL_PLATE,0.7f,0.85f,0.6f,0.45f,0.5f,-12,0.0f, MODEL_MEMBRANE,0.5f,0.83f,0.5f,0.5f,0.45f,0,0.0f, 0.38f,0.5f,0.2f,0.2f,0.75f,0.6f,0.75f,0.6f, 0.373f},
-  /* OldResonances */  {0.1f,0.1f,0.5f,0.1f,0.55f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.4f,0.85f,0.55f,0.5f,0.6f,0,0.0f, MODEL_PLATE,0.6f,0.8f,0.45f,0.4f,0.55f,5,0.0f, 0.4f,0.5f,0.15f,0.15f,0.65f,0.6f,0.65f,0.6f, 0.381f},
-  /* PreparedPiano */  {0.5f,0.35f,0.7f,0.01f,0.18f,0.3f,0.6f,0.5f, MODEL_STRING,0.4f,0.7f,0.55f,0.25f,0.7f,0,0.2f, MODEL_MEMBRANE,0.3f,0.6f,0.6f,0.4f,0.5f,12,0.0f, 0.4f,0.45f,0.0f,0.02f,0.4f,0.45f,0.35f,0.62f, 0.613f},
-  /* RythmicBow */     {0.05f,0.05f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_STRING,0.25f,0.9f,0.45f,0.3f,0.6f,0,0.25f, MODEL_PLATE,0.4f,0.85f,0.5f,0.45f,0.6f,7,0.0f, 0.55f,0.5f,0.1f,0.3f,0.55f,0.5f,0.5f,0.55f, 0.423f},
+  /* AlienChurch */    {0.2f,0.1f,0.7f,0.05f,0.4f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.9f,0.5f,0.5f,0.7f,0,0.0f, MODEL_PLATE,0.4f,0.85f,0.4f,0.4f,0.6f,7,0.0f, 0.35f,0.5f,0.2f,0.3f,0.7f,0.6f,0.6f,0.6f, 0.325f},
+  /* BowedGlass */     {0.0f,0.0f,0.5f,0.4f,0.6f,0.2f,0.2f,0.3f, MODEL_PLATE,0.3f,0.95f,0.6f,0.4f,0.6f,0,0.0f, MODEL_PLATE,0.5f,0.9f,0.5f,0.5f,0.7f,12,0.0f, 0.5f,0.5f,0.1f,0.5f,0.6f,0.5f,0.5f,0.55f, 0.537f},
+  /* CaveStrings */    {0.1f,0.05f,0.6f,0.1f,0.5f,0.4f,0.4f,0.3f, MODEL_STRING,0.2f,0.85f,0.4f,0.15f,0.6f,0,0.2f, MODEL_STRING,0.1f,0.8f,0.5f,0.25f,0.55f,-12,0.15f, 0.3f,0.5f,0.15f,0.05f,0.5f,0.6f,0.7f,0.6f, 0.763f},
+  /* CouncilsPiano */  {0.6f,0.0f,0.75f,0.01f,0.15f,0.2f,0.6f,0.5f, MODEL_STRING,0.35f,0.75f,0.6f,0.2f,0.7f,0,0.25f, MODEL_BEAM,0.15f,0.7f,0.6f,0.5f,0.65f,12,0.0f, 0.15f,0.35f,0.0f,0.02f,0.4f,0.4f,0.35f,0.6f, 2.275f},
+  /* DistortedBass */  {0.4f,0.2f,0.4f,0.01f,0.2f,0.6f,0.7f,0.4f, MODEL_STRING,0.0f,0.7f,0.3f,0.3f,0.4f,-12,0.6f, MODEL_STRING,0.05f,0.65f,0.4f,0.35f,0.35f,-12,0.7f, 0.55f,0.5f,0.05f,0.02f,0.35f,0.3f,0.2f,0.7f, 1.595f},
+  /* FeedbackHarp */   {0.2f,0.1f,0.65f,0.02f,0.25f,0.5f,0.5f,0.5f, MODEL_STRING,0.15f,0.92f,0.5f,0.4f,0.7f,0,0.3f, MODEL_STRING,0.2f,0.9f,0.55f,0.6f,0.6f,7,0.35f, 0.62f,0.5f,0.1f,0.03f,0.5f,0.55f,0.5f,0.55f, 2.398f},
+  /* JudgementAwaits */{0.15f,0.15f,0.55f,0.08f,0.5f,0.35f,0.3f,0.4f, MODEL_PLATE,0.7f,0.85f,0.6f,0.45f,0.5f,-12,0.0f, MODEL_MEMBRANE,0.5f,0.83f,0.5f,0.5f,0.45f,0,0.0f, 0.38f,0.5f,0.2f,0.2f,0.75f,0.6f,0.75f,0.6f, 0.359f},
+  /* OldResonances */  {0.1f,0.1f,0.5f,0.1f,0.55f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.4f,0.85f,0.55f,0.5f,0.6f,0,0.0f, MODEL_PLATE,0.6f,0.8f,0.45f,0.4f,0.55f,5,0.0f, 0.4f,0.5f,0.15f,0.15f,0.65f,0.6f,0.65f,0.6f, 0.322f},
+  /* PreparedPiano */  {0.5f,0.35f,0.7f,0.01f,0.18f,0.3f,0.6f,0.5f, MODEL_STRING,0.4f,0.7f,0.55f,0.25f,0.7f,0,0.2f, MODEL_MEMBRANE,0.3f,0.6f,0.6f,0.4f,0.5f,12,0.0f, 0.4f,0.45f,0.0f,0.02f,0.4f,0.45f,0.35f,0.62f, 0.666f},
+  /* RythmicBow */     {0.05f,0.05f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_STRING,0.25f,0.9f,0.45f,0.3f,0.6f,0,0.25f, MODEL_PLATE,0.4f,0.85f,0.5f,0.45f,0.6f,7,0.0f, 0.55f,0.5f,0.1f,0.3f,0.55f,0.5f,0.5f,0.55f, 0.451f},
   /* SensitiveSkin */  {0.3f,0.2f,0.6f,0.02f,0.3f,0.45f,0.55f,0.5f, MODEL_MEMBRANE,0.5f,0.75f,0.5f,0.5f,0.55f,0,0.0f, MODEL_STRING,0.15f,0.8f,0.5f,0.35f,0.6f,0,0.3f, 0.45f,0.5f,0.05f,0.05f,0.45f,0.55f,0.45f,0.6f, 0.441f},
-  /* Sharp */          {0.5f,0.05f,0.85f,0.005f,0.1f,0.3f,0.7f,0.6f, MODEL_BEAM,0.6f,0.65f,0.7f,0.3f,0.8f,0,0.0f, MODEL_BEAM,0.8f,0.6f,0.75f,0.5f,0.75f,12,0.0f, 0.2f,0.5f,0.0f,0.01f,0.3f,0.5f,0.3f,0.6f, 3.890f},
-  /* ShockingPluck */  {0.55f,0.1f,0.7f,0.005f,0.12f,0.4f,0.75f,0.6f, MODEL_STRING,0.3f,0.72f,0.6f,0.2f,0.75f,0,0.4f, MODEL_STRING,0.2f,0.68f,0.6f,0.3f,0.7f,0,0.45f, 0.25f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.65f, 1.086f},
-  /* Slappy */         {0.35f,0.25f,0.6f,0.005f,0.1f,0.5f,0.7f,0.5f, MODEL_MEMBRANE,0.3f,0.55f,0.6f,0.4f,0.45f,0,0.0f, MODEL_STRING,0.1f,0.6f,0.5f,0.3f,0.4f,-12,0.5f, 0.3f,0.45f,0.0f,0.01f,0.3f,0.45f,0.25f,0.68f, 0.297f},
-  /* SurroundedByBells*/{0.4f,0.05f,0.8f,0.01f,0.3f,0.25f,0.5f,0.5f, MODEL_PLATE,0.8f,0.92f,0.55f,0.5f,0.75f,12,0.0f, MODEL_PLATE,0.5f,0.9f,0.6f,0.45f,0.7f,19,0.0f, 0.35f,0.5f,0.1f,0.02f,0.7f,0.65f,0.7f,0.55f, 0.591f},
-  /* XyloStyle */      {0.6f,0.0f,0.85f,0.005f,0.12f,0.2f,0.65f,0.55f, MODEL_BEAM,0.9f,0.6f,0.7f,0.35f,0.8f,0,0.0f, MODEL_BEAM,0.7f,0.55f,0.75f,0.45f,0.75f,12,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.62f, 2.007f},
-  /* GlassKalimba */   {0.45f,0.05f,0.78f,0.005f,0.13f,0.25f,0.65f,0.55f, MODEL_BEAM,0.5f,0.62f,0.45f,0.6f,0.78f,12,0.0f, MODEL_PLATE,0.3f,0.6f,0.5f,0.5f,0.72f,12,0.0f, 0.2f,0.45f,0.0f,0.01f,0.4f,0.55f,0.45f,0.6f, 0.471f},
-  /* IronLullaby */    {0.05f,0.02f,0.55f,0.35f,0.55f,0.25f,0.3f,0.35f, MODEL_PLATE,0.5f,0.9f,0.55f,0.5f,0.55f,0,0.0f, MODEL_MEMBRANE,0.4f,0.86f,0.55f,0.5f,0.5f,7,0.0f, 0.4f,0.5f,0.15f,0.35f,0.75f,0.6f,0.6f,0.55f, 3.248f},
-  /* TidalGong */      {0.1f,0.03f,0.5f,0.05f,0.5f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.7f,0.85f,0.6f,0.4f,0.45f,-12,0.0f, MODEL_PLATE,0.6f,0.83f,0.55f,0.45f,0.5f,-5,0.0f, 0.33f,0.5f,0.2f,0.05f,0.8f,0.65f,0.7f,0.5f, 0.844f},
-  /* HollowReed */     {0.05f,0.02f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_PLATE,0.4f,0.88f,0.45f,0.6f,0.6f,0,0.0f, MODEL_STRING,0.2f,0.86f,0.5f,0.6f,0.62f,12,0.1f, 0.45f,0.5f,0.1f,0.3f,0.5f,0.5f,0.5f,0.55f, 0.518f},
-  /* StarlightPad */   {0.1f,0.05f,0.6f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.5f,0.86f,0.55f,0.5f,0.55f,12,0.0f, MODEL_PLATE,0.5f,0.85f,0.5f,0.55f,0.6f,19,0.0f, 0.3f,0.5f,0.2f,0.4f,0.78f,0.7f,0.75f,0.5f, 0.732f},
-  /* BrokenMusicBox */ {0.55f,0.08f,0.8f,0.005f,0.12f,0.2f,0.6f,0.55f, MODEL_BEAM,0.7f,0.62f,0.45f,0.7f,0.8f,12,0.0f, MODEL_BEAM,0.85f,0.58f,0.5f,0.6f,0.75f,13,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.55f,0.45f,0.6f, 8.700f},
-  /* DeepDiveBass */   {0.4f,0.1f,0.42f,0.008f,0.2f,0.5f,0.7f,0.4f, MODEL_STRING,0.05f,0.66f,0.35f,0.4f,0.45f,-24,0.4f, MODEL_STRING,0.1f,0.6f,0.4f,0.4f,0.4f,-12,0.3f, 0.3f,0.45f,0.05f,0.01f,0.35f,0.3f,0.2f,0.6f, 1.379f},
-  /* CopperTongue */   {0.45f,0.05f,0.72f,0.006f,0.14f,0.3f,0.65f,0.5f, MODEL_BEAM,0.4f,0.72f,0.4f,0.6f,0.7f,0,0.0f, MODEL_PLATE,0.35f,0.7f,0.5f,0.5f,0.66f,12,0.0f, 0.35f,0.5f,0.0f,0.01f,0.45f,0.5f,0.5f,0.6f, 0.901f},
-  /* GhostSitar */     {0.35f,0.12f,0.68f,0.008f,0.2f,0.45f,0.6f,0.5f, MODEL_STRING,0.3f,0.82f,0.4f,0.72f,0.7f,0,0.55f, MODEL_STRING,0.35f,0.8f,0.45f,0.68f,0.66f,7,0.5f, 0.4f,0.5f,0.05f,0.01f,0.5f,0.55f,0.5f,0.55f, 3.521f},
-  /* MarbleDrum */     {0.35f,0.15f,0.6f,0.005f,0.1f,0.4f,0.7f,0.45f, MODEL_MEMBRANE,0.3f,0.55f,0.55f,0.45f,0.5f,0,0.0f, MODEL_MEMBRANE,0.5f,0.5f,0.55f,0.4f,0.45f,-7,0.0f, 0.3f,0.5f,0.0f,0.01f,0.3f,0.45f,0.35f,0.6f, 0.372f},
-  /* WhisperHarp */    {0.15f,0.05f,0.62f,0.01f,0.3f,0.4f,0.55f,0.5f, MODEL_STRING,0.15f,0.82f,0.45f,0.7f,0.65f,12,0.1f, MODEL_STRING,0.1f,0.8f,0.5f,0.65f,0.6f,0,0.05f, 0.25f,0.5f,0.05f,0.01f,0.45f,0.6f,0.55f,0.55f, 0.834f},
-  /* TitaniumBell */   {0.4f,0.03f,0.82f,0.008f,0.2f,0.25f,0.55f,0.5f, MODEL_PLATE,0.75f,0.9f,0.5f,0.55f,0.8f,12,0.0f, MODEL_PLATE,0.6f,0.88f,0.48f,0.5f,0.75f,24,0.0f, 0.3f,0.5f,0.1f,0.01f,0.7f,0.6f,0.65f,0.5f, 0.843f},
-  /* FrozenLake */     {0.1f,0.05f,0.6f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.85f,0.5f,0.5f,0.55f,12,0.0f, MODEL_PLATE,0.5f,0.85f,0.48f,0.55f,0.62f,7,0.0f, 0.3f,0.5f,0.25f,0.4f,0.7f,0.7f,0.8f,0.5f, 0.354f},
-  /* PulseEngine */    {0.35f,0.15f,0.6f,0.008f,0.18f,0.45f,0.65f,0.5f, MODEL_STRING,0.2f,0.75f,0.35f,0.5f,0.6f,0,0.4f, MODEL_BEAM,0.5f,0.7f,0.45f,0.5f,0.6f,-12,0.0f, 0.55f,0.5f,0.0f,0.01f,0.4f,0.5f,0.3f,0.55f, 1.035f},
+  /* Sharp */          {0.5f,0.05f,0.85f,0.005f,0.1f,0.3f,0.7f,0.6f, MODEL_BEAM,0.6f,0.65f,0.7f,0.3f,0.8f,0,0.0f, MODEL_BEAM,0.8f,0.6f,0.75f,0.5f,0.75f,12,0.0f, 0.2f,0.5f,0.0f,0.01f,0.3f,0.5f,0.3f,0.6f, 4.036f},
+  /* ShockingPluck */  {0.55f,0.1f,0.7f,0.005f,0.12f,0.4f,0.75f,0.6f, MODEL_STRING,0.3f,0.72f,0.6f,0.2f,0.75f,0,0.4f, MODEL_STRING,0.2f,0.68f,0.6f,0.3f,0.7f,0,0.45f, 0.25f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.65f, 1.141f},
+  /* Slappy */         {0.35f,0.25f,0.6f,0.005f,0.1f,0.5f,0.7f,0.5f, MODEL_MEMBRANE,0.3f,0.55f,0.6f,0.4f,0.45f,0,0.0f, MODEL_STRING,0.1f,0.6f,0.5f,0.3f,0.4f,-12,0.5f, 0.3f,0.45f,0.0f,0.01f,0.3f,0.45f,0.25f,0.68f, 0.327f},
+  /* SurroundedByBells*/{0.4f,0.05f,0.8f,0.01f,0.3f,0.25f,0.5f,0.5f, MODEL_PLATE,0.8f,0.92f,0.55f,0.5f,0.75f,12,0.0f, MODEL_PLATE,0.5f,0.9f,0.6f,0.45f,0.7f,19,0.0f, 0.35f,0.5f,0.1f,0.02f,0.7f,0.65f,0.7f,0.55f, 0.237f},
+  /* XyloStyle */      {0.6f,0.0f,0.85f,0.005f,0.12f,0.2f,0.65f,0.55f, MODEL_BEAM,0.9f,0.6f,0.7f,0.35f,0.8f,0,0.0f, MODEL_BEAM,0.7f,0.55f,0.75f,0.45f,0.75f,12,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.62f, 1.411f},
+  /* GlassKalimba */   {0.45f,0.05f,0.78f,0.005f,0.13f,0.25f,0.65f,0.55f, MODEL_BEAM,0.5f,0.62f,0.45f,0.6f,0.78f,12,0.0f, MODEL_PLATE,0.3f,0.6f,0.5f,0.5f,0.72f,12,0.0f, 0.2f,0.45f,0.0f,0.01f,0.4f,0.55f,0.45f,0.6f, 0.465f},
+  /* IronLullaby */    {0.05f,0.02f,0.55f,0.35f,0.55f,0.25f,0.3f,0.35f, MODEL_PLATE,0.5f,0.9f,0.55f,0.5f,0.55f,0,0.0f, MODEL_MEMBRANE,0.4f,0.86f,0.55f,0.5f,0.5f,7,0.0f, 0.4f,0.5f,0.15f,0.35f,0.75f,0.6f,0.6f,0.55f, 0.380f},
+  /* TidalGong */      {0.1f,0.03f,0.5f,0.05f,0.5f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.7f,0.85f,0.6f,0.4f,0.45f,-12,0.0f, MODEL_PLATE,0.6f,0.83f,0.55f,0.45f,0.5f,-5,0.0f, 0.33f,0.5f,0.2f,0.05f,0.8f,0.65f,0.7f,0.5f, 1.483f},
+  /* HollowReed */     {0.05f,0.02f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_PLATE,0.4f,0.88f,0.45f,0.6f,0.6f,0,0.0f, MODEL_STRING,0.2f,0.86f,0.5f,0.6f,0.62f,12,0.1f, 0.45f,0.5f,0.1f,0.3f,0.5f,0.5f,0.5f,0.55f, 0.539f},
+  /* StarlightPad */   {0.1f,0.05f,0.6f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.5f,0.86f,0.6f,0.5f,0.55f,12,0.0f, MODEL_PLATE,0.5f,0.85f,0.55f,0.55f,0.6f,12,0.0f, 0.3f,0.5f,0.2f,0.4f,0.78f,0.7f,0.75f,0.5f, 0.405f},
+  /* BrokenMusicBox */ {0.55f,0.08f,0.8f,0.005f,0.12f,0.2f,0.6f,0.55f, MODEL_BEAM,0.7f,0.62f,0.45f,0.7f,0.8f,12,0.0f, MODEL_BEAM,0.85f,0.58f,0.5f,0.6f,0.75f,13,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.55f,0.45f,0.6f, 10.000f},
+  /* DeepDiveBass */   {0.4f,0.1f,0.42f,0.008f,0.2f,0.5f,0.7f,0.4f, MODEL_STRING,0.05f,0.66f,0.35f,0.4f,0.45f,-24,0.4f, MODEL_STRING,0.1f,0.6f,0.4f,0.4f,0.4f,-12,0.3f, 0.3f,0.45f,0.05f,0.01f,0.35f,0.3f,0.2f,0.6f, 1.448f},
+  /* CopperTongue */   {0.45f,0.05f,0.6f,0.006f,0.14f,0.3f,0.65f,0.5f, MODEL_BEAM,0.4f,0.72f,0.5f,0.55f,0.62f,-12,0.0f, MODEL_PLATE,0.35f,0.7f,0.55f,0.5f,0.58f,0,0.0f, 0.35f,0.5f,0.0f,0.01f,0.45f,0.5f,0.5f,0.6f, 0.513f},
+  /* GhostSitar */     {0.35f,0.12f,0.68f,0.008f,0.2f,0.45f,0.6f,0.5f, MODEL_STRING,0.3f,0.82f,0.4f,0.72f,0.7f,0,0.55f, MODEL_STRING,0.35f,0.8f,0.45f,0.68f,0.66f,7,0.5f, 0.4f,0.5f,0.05f,0.01f,0.5f,0.55f,0.5f,0.55f, 3.688f},
+  /* MarbleDrum */     {0.35f,0.15f,0.6f,0.005f,0.1f,0.4f,0.7f,0.45f, MODEL_MEMBRANE,0.3f,0.55f,0.55f,0.45f,0.5f,0,0.0f, MODEL_MEMBRANE,0.5f,0.5f,0.55f,0.4f,0.45f,-7,0.0f, 0.3f,0.5f,0.0f,0.01f,0.3f,0.45f,0.35f,0.6f, 0.408f},
+  /* WhisperHarp */    {0.15f,0.05f,0.62f,0.01f,0.3f,0.4f,0.55f,0.5f, MODEL_STRING,0.15f,0.82f,0.45f,0.7f,0.65f,12,0.1f, MODEL_STRING,0.1f,0.8f,0.5f,0.65f,0.6f,0,0.05f, 0.25f,0.5f,0.05f,0.01f,0.45f,0.6f,0.55f,0.55f, 0.881f},
+  /* TitaniumBell */   {0.4f,0.03f,0.82f,0.008f,0.2f,0.25f,0.55f,0.5f, MODEL_PLATE,0.75f,0.9f,0.5f,0.55f,0.8f,12,0.0f, MODEL_PLATE,0.6f,0.88f,0.48f,0.5f,0.75f,24,0.0f, 0.3f,0.5f,0.1f,0.01f,0.7f,0.6f,0.65f,0.5f, 4.257f},
+  /* FrozenLake */     {0.1f,0.05f,0.6f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.85f,0.5f,0.5f,0.55f,12,0.0f, MODEL_PLATE,0.5f,0.85f,0.48f,0.55f,0.62f,7,0.0f, 0.3f,0.5f,0.25f,0.4f,0.7f,0.7f,0.8f,0.5f, 0.267f},
+  /* PulseEngine */    {0.35f,0.15f,0.6f,0.008f,0.18f,0.45f,0.65f,0.5f, MODEL_STRING,0.2f,0.75f,0.35f,0.5f,0.6f,0,0.4f, MODEL_BEAM,0.5f,0.7f,0.45f,0.5f,0.6f,-12,0.0f, 0.55f,0.5f,0.0f,0.01f,0.4f,0.5f,0.3f,0.55f, 0.894f},
 };
 
 /* ── Parameter descriptor table (float/int fields of params_t) ───────────────── */
@@ -628,6 +728,9 @@ static const pdesc_t PDESC[] = {
     PF("rev_damp","Rev Damp",0,1,0.01f,rev_damp), PF("dly_mix","Delay",0,1,0.01f,dly_mix),
     PF("dly_time","Dly Time",0,1,0.01f,dly_time), PF("dly_fb","Dly Fbk",0,1,0.01f,dly_fb),
     PF("dly_tone","Dly Tone",0,1,0.01f,dly_tone), PF("width","Width",0,1,0.01f,width),
+
+    PF("cutoff","Cutoff",0,1,0.01f,flt_cutoff), PF("resonance","Resonance",0,1,0.01f,flt_reso),
+    PI_("ftype","Filter Type",0,N_FTYPE-1,1,flt_type), PI_("voicing","Voicing",0,N_VOICING-1,1,flt_voicing),
 };
 static const int N_PDESC = (int)(sizeof(PDESC) / sizeof(PDESC[0]));
 
@@ -647,7 +750,12 @@ static inline int *pi_ptr(fizzik_t *inst, const pdesc_t *d) {
 
 static void apply_preset(fizzik_t *inst, int idx) {
     idx = (idx < 0) ? 0 : (idx >= N_PRESETS ? N_PRESETS - 1 : idx);
+    /* Filter is a global master control — keep it across preset changes. */
+    float f_cut = inst->p.flt_cutoff, f_res = inst->p.flt_reso;
+    int   f_typ = inst->p.flt_type,   f_voi = inst->p.flt_voicing;
     inst->p = PRESETS[idx];
+    inst->p.flt_cutoff = f_cut; inst->p.flt_reso = f_res;
+    inst->p.flt_type = f_typ;   inst->p.flt_voicing = f_voi;
     if (inst->p.makeup < 1e-6f) inst->p.makeup = 1.0f;
     /* FX aren't in the positional preset table — give them musical defaults
      * (rev_mix comes from the preset's own value above). */
@@ -668,7 +776,12 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     if (!inst) return NULL;
 
     inst->rng = 0xC0FFEEu;
+    /* Filter defaults: fully open, no resonance, LP, Clean SVF (transparent). */
+    inst->p.flt_cutoff = 1.0f; inst->p.flt_reso = 0.0f;
+    inst->p.flt_type = 0; inst->p.flt_voicing = 0;
     apply_preset(inst, 2);   /* CaveStrings — pleasant default */
+    inst->sm = inst->p;      /* prime smoothed shadow (no startup glide) */
+    filter_reset(&inst->fltL); filter_reset(&inst->fltR);
     inst->current_page = 0;
     inst->dly_time_smooth = 16000.0f;
 
@@ -767,6 +880,11 @@ static int parse_model(const char *val) {
     for (int i = 0; i < 4; i++) if (strcmp(val, MODEL_NAMES[i]) == 0) return i;
     int idx = atoi(val); return (idx < 0) ? 0 : (idx > 3) ? 3 : idx;
 }
+/* Generic enum parse: name match, else clamped index. */
+static int parse_enum(const char *val, const char **names, int count) {
+    for (int i = 0; i < count; i++) if (strcmp(val, names[i]) == 0) return i;
+    int idx = atoi(val); return (idx < 0) ? 0 : (idx >= count) ? count - 1 : idx;
+}
 
 static void set_param(void *instance, const char *key, const char *val) {
     fizzik_t *inst = (fizzik_t *)instance;
@@ -828,6 +946,8 @@ static void set_param(void *instance, const char *key, const char *val) {
     }
     if (strcmp(key, "a_model") == 0) { inst->p.a_model = parse_model(val); return; }
     if (strcmp(key, "b_model") == 0) { inst->p.b_model = parse_model(val); return; }
+    if (strcmp(key, "ftype")   == 0) { inst->p.flt_type = parse_enum(val, FTYPE_NAMES, N_FTYPE); return; }
+    if (strcmp(key, "voicing") == 0) { inst->p.flt_voicing = parse_enum(val, VOICING_NAMES, N_VOICING); return; }
 
     /* State restore: newline-separated key=value. */
     if (strcmp(key, "state") == 0) {
@@ -911,6 +1031,10 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"dly_fb\",\"name\":\"Dly Fbk\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"dly_tone\",\"name\":\"Dly Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"width\",\"name\":\"Width\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"cutoff\",\"name\":\"Cutoff\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"resonance\",\"name\":\"Resonance\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"ftype\",\"name\":\"Filter Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\",\"Notch\"]},"
+          "{\"key\":\"voicing\",\"name\":\"Voicing\",\"type\":\"enum\",\"options\":[\"Clean SVF\",\"SEM\",\"MS-20\",\"Steiner\",\"Ladder 4P\",\"Ladder 2P\",\"Ladder 1P\",\"Prophet\",\"Oberheim\",\"Diode\",\"Sallen-Key\",\"Vintage\"]},"
           "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\"]},"
           "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
           "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
@@ -921,14 +1045,14 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "ui_hierarchy") == 0) {
         return snprintf(buf, buf_len,
           "{\"modes\":null,\"levels\":{"
-          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\"],"
+          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],"
           "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"}]},"
           "\"Exciter\":{\"name\":\"Exciter\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],\"params\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"]},"
           "\"ResonA\":{\"name\":\"Reson A\",\"knobs\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"],\"params\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"]},"
           "\"ResonB\":{\"name\":\"Reson B\",\"knobs\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"],\"params\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"]},"
           "\"Voice\":{\"name\":\"Voice\",\"knobs\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"drive\",\"level\"],\"params\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"drive\",\"level\"]},"
           "\"FX\":{\"name\":\"FX\",\"knobs\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"],\"params\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"]},"
-          "\"Patch\":{\"name\":\"Patch\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\"],\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\"]}"
+          "\"Patch\":{\"name\":\"Patch\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"]}"
           "}}");
     }
 
@@ -952,6 +1076,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strncmp(pk, "rnd_", 4) == 0) return snprintf(buf, buf_len, "Go");
         if (strcmp(pk, "a_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.a_model & 3]);
         if (strcmp(pk, "b_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.b_model & 3]);
+        if (strcmp(pk, "ftype")   == 0) return snprintf(buf, buf_len, "%s", FTYPE_NAMES[inst->p.flt_type % N_FTYPE]);
+        if (strcmp(pk, "voicing") == 0) return snprintf(buf, buf_len, "%s", VOICING_NAMES[inst->p.flt_voicing % N_VOICING]);
         const pdesc_t *d = find_pdesc(pk);
         if (d) {
             if (d->isint) return snprintf(buf, buf_len, "%d", *pi_ptr(inst, d));
@@ -974,6 +1100,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     /* Enums by key -> string names. */
     if (strcmp(key, "a_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.a_model & 3]);
     if (strcmp(key, "b_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.b_model & 3]);
+    if (strcmp(key, "ftype")   == 0) return snprintf(buf, buf_len, "%s", FTYPE_NAMES[inst->p.flt_type % N_FTYPE]);
+    if (strcmp(key, "voicing") == 0) return snprintf(buf, buf_len, "%s", VOICING_NAMES[inst->p.flt_voicing % N_VOICING]);
     if (strcmp(key, "preset")  == 0) return snprintf(buf, buf_len, "%s", PRESET_NAMES[inst->preset_idx]);
     if (strncmp(key, "rnd_", 4) == 0) return snprintf(buf, buf_len, "0");
 
@@ -991,40 +1119,59 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
 
 static void render_block(void *instance, int16_t *out_lr, int frames) {
     fizzik_t *inst = (fizzik_t *)instance;
-    params_t *p = &inst->p;
+    params_t *p = &inst->p;   /* targets; discrete params (models/tunes/enums) read here */
 
-    /* Map global params once per block. */
-    float couple      = clampf(p->couple, 0.0f, 1.0f);
-    float balance     = clampf(p->balance, 0.0f, 1.0f);
-    float glide_ms    = map_exp(p->glide + 1e-4f, 1.0f, 500.0f) * (p->glide < 1e-3f ? 0.0f : 1.0f);
+    /* Analog-style 20 ms smoothing of every continuous parameter. Discrete
+     * (int) params are copied straight through. `s` = smoothed shadow. */
+    const float scoef = 0.135f;
+    for (int i = 0; i < N_PDESC; i++) {
+        const pdesc_t *d = &PDESC[i];
+        if (d->isint) *(int *)((char *)&inst->sm + d->off) = *(int *)((char *)&inst->p + d->off);
+        else {
+            float *sv = (float *)((char *)&inst->sm + d->off);
+            *sv += scoef * (*(float *)((char *)&inst->p + d->off) - *sv);
+        }
+    }
+    params_t *s = &inst->sm;
+
+    /* Map global params once per block (continuous from `s`, discrete from `p`). */
+    float couple      = clampf(s->couple, 0.0f, 1.0f);
+    float balance     = clampf(s->balance, 0.0f, 1.0f);
+    float glide_ms    = map_exp(s->glide + 1e-4f, 1.0f, 500.0f) * (s->glide < 1e-3f ? 0.0f : 1.0f);
     float glide_coef  = (glide_ms > 0.5f) ? expf(-1.0f / (glide_ms * 0.001f * SR)) : 0.0f;
-    float amp_atk_ms  = map_exp(p->amp_attack, 0.5f, 200.0f);
-    float amp_rel_ms  = map_exp(p->amp_release, 20.0f, 3000.0f);
+    float amp_atk_ms  = map_exp(s->amp_attack, 0.5f, 200.0f);
+    float amp_rel_ms  = map_exp(s->amp_release, 20.0f, 3000.0f);
     float atk_inc     = 1.0f / (amp_atk_ms * 0.001f * SR);
     float rel_coef    = expf(-1.0f / (amp_rel_ms * 0.001f * SR));
-    float level_gain  = p->level * p->level * 0.7f * p->makeup;   /* halved for headroom */
+    float level_gain  = s->level * s->level * 0.7f * p->makeup;   /* halved for headroom */
+    /* Global filter. */
+    float flt_fc   = map_exp(clampf(s->flt_cutoff, 0.0f, 1.0f), 30.0f, 18000.0f);
+    float flt_g    = tanf(PI * clampf(flt_fc, 20.0f, 19500.0f) * SR_INV);
+    float flt_res  = clampf(s->flt_reso, 0.0f, 1.0f);
+    int   flt_type = p->flt_type % N_FTYPE;
+    int   flt_voi  = p->flt_voicing % N_VOICING;
     /* FX params. */
-    float rev_mix   = clampf(p->rev_mix, 0.0f, 1.0f);
-    float rev_fb    = 0.60f + 0.38f * clampf(p->rev_size, 0.0f, 1.0f);   /* 0.60..0.98 */
-    float rev_damp  = 0.05f + 0.60f * clampf(p->rev_damp, 0.0f, 1.0f);   /* 0.05..0.65 */
-    float dly_mix   = clampf(p->dly_mix, 0.0f, 1.0f);
-    float dly_fb    = clampf(p->dly_fb, 0.0f, 1.0f) * 0.85f;
-    float dly_cut   = map_exp(clampf(p->dly_tone, 0.0f, 1.0f), 800.0f, 12000.0f);
+    float rev_mix   = clampf(s->rev_mix, 0.0f, 1.0f);
+    float rev_fb    = 0.60f + 0.38f * clampf(s->rev_size, 0.0f, 1.0f);   /* 0.60..0.98 */
+    float rev_damp  = 0.05f + 0.60f * clampf(s->rev_damp, 0.0f, 1.0f);   /* 0.05..0.65 */
+    float dly_mix   = clampf(s->dly_mix, 0.0f, 1.0f);
+    float dly_fb    = clampf(s->dly_fb, 0.0f, 1.0f) * 0.85f;
+    float dly_cut   = map_exp(clampf(s->dly_tone, 0.0f, 1.0f), 800.0f, 12000.0f);
     float dly_lpc   = 1.0f - expf(-TWO_PI * dly_cut * SR_INV);
-    float dly_target = clampf(map_exp(p->dly_time, 30.0f, 700.0f) * 0.001f * SR, 64.0f, (float)(DLY_MAX - 4));
-    float drive     = clampf(p->drive, 0.0f, 1.0f);
+    float dly_target = clampf(map_exp(s->dly_time, 30.0f, 700.0f) * 0.001f * SR, 64.0f, (float)(DLY_MAX - 4));
+    float drive     = clampf(s->drive, 0.0f, 1.0f);
     float drive_g   = 1.0f + drive * 4.0f;
     float drive_cmp = 1.0f / (1.0f + drive * 1.2f);
-    float width     = clampf(p->width, 0.0f, 1.0f);
+    float width     = clampf(s->width, 0.0f, 1.0f);
 
     /* Exciter param mapping. */
-    float exc_mix    = clampf(p->exc_mix, 0.0f, 1.0f);
-    float exc_crk    = clampf(p->exc_crackle, 0.0f, 1.0f);
-    float exc_atk_ms = map_exp(p->exc_attack, 0.2f, 40.0f);
-    float exc_dec_ms = map_exp(p->exc_decay, 2.0f, 400.0f);
-    float exc_reso   = clampf(p->exc_reso, 0.0f, 1.0f);
-    float vel_level  = clampf(p->vel_level, 0.0f, 1.0f);
-    float vel_color  = clampf(p->vel_color, 0.0f, 1.0f);
+    float exc_mix    = clampf(s->exc_mix, 0.0f, 1.0f);
+    float exc_crk    = clampf(s->exc_crackle, 0.0f, 1.0f);
+    float exc_atk_ms = map_exp(s->exc_attack, 0.2f, 40.0f);
+    float exc_dec_ms = map_exp(s->exc_decay, 2.0f, 400.0f);
+    float exc_reso   = clampf(s->exc_reso, 0.0f, 1.0f);
+    float vel_level  = clampf(s->vel_level, 0.0f, 1.0f);
+    float vel_color  = clampf(s->vel_color, 0.0f, 1.0f);
 
     for (int n = 0; n < frames; n++) {
         float mixL = 0.0f, mixR = 0.0f;
@@ -1041,12 +1188,12 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             if (n == 0) {
                 float fA = v->freq * powf(2.0f, (float)p->a_tune / 12.0f);
                 float fB = v->freq * powf(2.0f, (float)p->b_tune / 12.0f);
-                reso_set(&v->A, p->a_model & 3, fA, p->a_struct, p->a_decay, p->a_damp, p->a_pos, p->a_tone, p->a_tension);
-                reso_set(&v->B, p->b_model & 3, fB, p->b_struct, p->b_decay, p->b_damp, p->b_pos, p->b_tone, p->b_tension);
+                reso_set(&v->A, p->a_model & 3, fA, s->a_struct, s->a_decay, s->a_damp, s->a_pos, s->a_tone, s->a_tension);
+                reso_set(&v->B, p->b_model & 3, fB, s->b_struct, s->b_decay, s->b_damp, s->b_pos, s->b_tone, s->b_tension);
             }
 
             /* Exciter (velocity links). */
-            float vcolor = clampf(p->exc_color + vel_color * (v->velocity - 0.5f), 0.0f, 1.0f);
+            float vcolor = clampf(s->exc_color + vel_color * (v->velocity - 0.5f), 0.0f, 1.0f);
             float color_cut = map_exp(vcolor, 300.0f, 16000.0f);
             float exc = exciter_process(&v->exc, v->freq, exc_mix, exc_crk, color_cut, exc_reso, exc_atk_ms, exc_dec_ms);
             float vgain = 1.0f - vel_level * (1.0f - v->velocity);
@@ -1071,21 +1218,25 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 default: break;
             }
 
-            float s = mixed * v->amp_env;
+            float vout = mixed * v->amp_env;
 
             /* Silence detection to free the voice (only after release). */
-            float a = fabsf(s);
+            float a = fabsf(vout);
             if (v->amp_stage == 2 && a < 0.0008f) { if (++v->silent > 2205) v->active = 0; }
             else v->silent = 0;
 
-            mixL += s * v->pan_l;
-            mixR += s * v->pan_r;
+            mixL += vout * v->pan_l;
+            mixR += vout * v->pan_r;
         }
 
-        /* Drive (soft saturation on the dry voice mix). */
-        if (drive > 0.001f) {
-            mixL = tanhf(mixL * drive_g) * drive_cmp;
-            mixR = tanhf(mixR * drive_g) * drive_cmp;
+        /* Global multimode filter (post-synth, pre-FX). */
+        mixL = filter_process(&inst->fltL, mixL, flt_g, flt_res, flt_type, flt_voi);
+        mixR = filter_process(&inst->fltR, mixR, flt_g, flt_res, flt_type, flt_voi);
+
+        /* Drive — dry/wet blend so it fades in from 0 (no click at engage). */
+        if (drive > 0.0001f) {
+            mixL += drive * (ftanh(mixL * drive_g) * drive_cmp - mixL);
+            mixR += drive * (ftanh(mixR * drive_g) * drive_cmp - mixR);
         }
 
         /* Stereo ping-pong delay (always runs to keep the tail continuous). */

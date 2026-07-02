@@ -45,7 +45,8 @@ int main(void) {
         /* --- single note: pre-limiter peak/rms --- */
         void *i = a->create_instance("/tmp", "");
         a->set_param(i, "preset", NAMES[pi]);
-        a->set_param(i, "__makeup", "1.0");   /* measure raw */
+        a->set_param(i, "__makeup", "1.0");
+        { int16_t sb[256]; for (int w=0; w<40; w++) a->render_block(i, sb, 128); } /* settle 20ms smoothing */   /* measure raw */
         uint8_t on[3]={0x90,60,100}, off[3]={0x80,60,0};
         a->on_midi(i, on, 3, 0);
         a->get_param(i, "__meter", m, 64);            /* reset */
@@ -57,6 +58,7 @@ int main(void) {
         i = a->create_instance("/tmp", "");
         a->set_param(i, "preset", NAMES[pi]);
         a->set_param(i, "__makeup", "1.0");
+        { int16_t sb[256]; for (int w=0; w<40; w++) a->render_block(i, sb, 128); } /* settle 20ms smoothing */
         uint8_t c[4][3]={{0x90,52,110},{0x90,55,110},{0x90,59,110},{0x90,64,110}};
         for(int v=0;v<4;v++) a->on_midi(i,c[v],3,0);
         a->get_param(i,"__meter",m,64);
@@ -68,6 +70,7 @@ int main(void) {
         i = a->create_instance("/tmp", "");
         a->set_param(i, "preset", NAMES[pi]);
         a->set_param(i, "__makeup", "1.0");
+        { int16_t sb[256]; for (int w=0; w<40; w++) a->render_block(i, sb, 128); } /* settle 20ms smoothing */
         a->on_midi(i,on,3,0);
         for(int b=0;b<60;b++) a->render_block(i,buf,128);
         a->on_midi(i,off,3,0);
@@ -77,8 +80,12 @@ int main(void) {
         meter(a,i,&tailpk,&tailrms);
         a->destroy_instance(i);
 
-        double makeup = 0.4 / (pk + 1e-9);
-        if (makeup < 0.1) makeup = 0.1; if (makeup > 8.0) makeup = 8.0;
+        /* Perceptual level: cap by peak AND sustained RMS so long/bright
+         * resonances don't read as loud as their transient suggests. */
+        double mk_peak = 0.42 / (pk + 1e-9);
+        double mk_rms  = 0.13 / (rms + 1e-9);
+        double makeup = mk_peak < mk_rms ? mk_peak : mk_rms;
+        if (makeup < 0.1) makeup = 0.1; if (makeup > 10.0) makeup = 10.0;
         const char *flag = (tailrms > 0.03) ? " <RUNAWAY?" : (chordpk > 2.6 ? " <hot-chord" : "");
         printf("%-16s %6.3f %6.4f | %6.3f | %7.4f | %.3ff%s\n",
                NAMES[pi], pk, rms, chordpk, tailrms, makeup, flag);

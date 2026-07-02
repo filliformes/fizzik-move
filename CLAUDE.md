@@ -28,8 +28,8 @@ Modal core = bank of ≤24 RBJ band-pass biquads, recomputed only when pitch/str
 - `scripts/install.sh` — scp to `modules/sound_generators/fizzik/`, chmod +x, chown
 - `.github/workflows/release.yml` — CI: version check → build → release → release.json
 
-## Pages (Patch is FIRST / root; 8 knobs each except Patch=4)
-1. **Patch** (root knobs): preset (30 named), rnd_patch, rnd_exc, rnd_reson
+## Pages (Patch is FIRST / root; 8 knobs each)
+1. **Patch** (root knobs): preset (30 named), rnd_patch, rnd_exc, rnd_reson, **cutoff, resonance, ftype, voicing** (global filter)
 2. **Exciter**: exc_mix, exc_crackle, exc_color, exc_attack, exc_decay, exc_reso, vel_level, vel_color
 3. **Reson A**: a_model, a_struct, a_decay, a_damp, a_pos, a_tone, a_tune, a_tension
 4. **Reson B**: b_* (same eight)
@@ -52,7 +52,28 @@ Modal core = bank of ≤24 RBJ band-pass biquads, recomputed only when pitch/str
   (`fizzik-native` = debian+native-gcc image.) Hidden DSP hooks `get_param("__meter")`
   and `set_param("__makeup",..)` support it. Bake results into the `PRESETS[]` makeup column.
 - FX: reverb (Schroeder, size/damp/mix), stereo ping-pong delay (time/fb/tone/mix),
-  drive (tanh), width (M/S). FX defaults set in `apply_preset` (not in the positional table).
+  drive (tanh **dry/wet blend** — no click at engage), width (M/S). FX defaults set in
+  `apply_preset` (not in the positional table).
+
+## Global filter (post-synth, pre-FX)
+Multimode VA filter on the Patch/root page (knobs 5–8: Cutoff, Resonance, Filter Type
+LP/HP/BP/Notch, Voicing). Clean-room from public VA-filter math (Cytomic trapezoidal SVF +
+Zavalishin ZDF transistor ladder). **12 voicings**: Clean SVF, SEM, MS-20, Steiner,
+Ladder 4P/2P/1P, Prophet, Oberheim, Diode, Sallen-Key, Vintage. Self-oscillating resonance
+bounded by tanh feedback (verified finite at res=1). Stereo (`fltL/fltR`). It's a **global
+master control** — `apply_preset` preserves it across preset loads (not per-preset). This is
+the primary tool for taming bright/high-pitched resonances.
+
+## Analog-style parameter smoothing
+Every continuous param is 20 ms one-pole smoothed per block into `inst->sm` (a `params_t`
+shadow), iterated over the `PDESC` table (float = smoothed, int = copied). render_block reads
+continuous params from `sm`, discrete (models, tunes, enums, makeup) from `p`. Prime `sm = p`
+in create_instance. This kills zipper/clicks (incl. the old Drive engage click).
+
+## Level calibration = perceptual (peak + RMS)
+`makeup = min(0.42/peak, 0.13/rms)` — caps by transient peak AND sustained RMS, so long/
+bright resonances (pads, bells) don't read as loud as their attack. Output is halved
+(`level²·0.7`) with a gentle master limiter `out_limit` (0.9·tanh) so polyphony never clips.
 
 ## Constants worth knowing
 `MAX_VOICES 6`, `DELAY_MAX 2048` (~21.5 Hz min), `N_ALLPASS 4`, `MAX_MODES 24`. SR 44100.
