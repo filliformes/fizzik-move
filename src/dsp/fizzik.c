@@ -1245,9 +1245,9 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"at_vrate\",\"name\":\"AT Vib Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"at_curve\",\"name\":\"AT Curve\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\"]},"
-          "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"enum\",\"options\":[\"idle\",\"trigger\"]},"
-          "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"enum\",\"options\":[\"idle\",\"trigger\"]},"
-          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"enum\",\"options\":[\"idle\",\"trigger\"]}"
+          "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
+          "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
+          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1}"
           "]");
     }
 
@@ -1285,7 +1285,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (idx < 0 || idx >= PAGE_NKNOBS[inst->current_page]) return 0;
         const char *pk = PAGE_KEYS[inst->current_page][idx];
         if (strcmp(pk, "preset") == 0) return snprintf(buf, buf_len, "%s", PRESET_NAMES[inst->preset_idx]);
-        if (strncmp(pk, "rnd_", 4) == 0) return snprintf(buf, buf_len, "idle");
+        if (strncmp(pk, "rnd_", 4) == 0) return snprintf(buf, buf_len, "0");
         if (strcmp(pk, "a_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.a_model & 3]);
         if (strcmp(pk, "b_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.b_model & 3]);
         if (strcmp(pk, "ftype")   == 0) return snprintf(buf, buf_len, "%s", FTYPE_NAMES[inst->p.flt_type % N_FTYPE]);
@@ -1325,7 +1325,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "lfo1_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo1_target % N_LFO_TGT]);
     if (strcmp(key, "lfo2_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo2_target % N_LFO_TGT]);
     if (strcmp(key, "preset")  == 0) return snprintf(buf, buf_len, "%s", PRESET_NAMES[inst->preset_idx]);
-    if (strncmp(key, "rnd_", 4) == 0) return snprintf(buf, buf_len, "idle");  /* Schwung trigger-enum idle */
+    if (strncmp(key, "rnd_", 4) == 0) return snprintf(buf, buf_len, "0");   /* int trigger idle (Aphex-style) */
 
     /* Regular fields: raw values (raw for round-trip persistence). */
     const pdesc_t *d = find_pdesc(key);
