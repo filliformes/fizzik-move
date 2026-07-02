@@ -49,7 +49,24 @@
 
 #define N_PRESETS     30
 
+#define N_AT_PRESET 10
 static const char *MODEL_NAMES[4]  = { "String", "Beam", "Plate", "Membrane" };
+static const char *AT_PRESET_NAMES[N_AT_PRESET] = {
+    "Off", "Gentle", "Brighten", "Bow", "Swell", "Vibrato", "Expressive", "Cello", "Wild", "Sforzato"
+};
+/* {bright, bow, cutoff, vib, bend, vrate, curve} — curve<0.5 soft, >0.5 hard */
+static const float AT_PRESETS[N_AT_PRESET][7] = {
+    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.50f, 0.50f},   /* Off        */
+    {0.40f,0.10f,0.25f,0.10f,0.0f, 0.50f, 0.40f},   /* Gentle     */
+    {0.80f,0.0f, 0.50f,0.0f, 0.0f, 0.50f, 0.50f},   /* Brighten   */
+    {0.30f,0.70f,0.20f,0.0f, 0.0f, 0.50f, 0.50f},   /* Bow        */
+    {0.40f,0.50f,0.30f,0.15f,0.05f,0.45f, 0.60f},   /* Swell      */
+    {0.10f,0.0f, 0.10f,0.70f,0.0f, 0.60f, 0.40f},   /* Vibrato    */
+    {0.60f,0.40f,0.40f,0.30f,0.10f,0.50f, 0.50f},   /* Expressive */
+    {0.50f,0.60f,0.30f,0.40f,0.10f,0.40f, 0.55f},   /* Cello      */
+    {0.80f,0.60f,0.60f,0.50f,0.30f,0.55f, 0.70f},   /* Wild       */
+    {0.90f,0.30f,0.70f,0.20f,0.20f,0.50f, 0.80f},   /* Sforzato   */
+};
 static const char *PRESET_NAMES[N_PRESETS] = {
     "AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass",
     "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow",
@@ -60,15 +77,18 @@ static const char *PRESET_NAMES[N_PRESETS] = {
 };
 
 /* Page-aware knob overlay: keys per page (index = current_page). */
-static const char *PAGE_KEYS[6][8] = {
+static const char *PAGE_KEYS[9][8] = {
     { "preset","rnd_patch","rnd_exc","rnd_reson","cutoff","resonance","ftype","voicing" },
     { "exc_mix","exc_crackle","exc_color","exc_attack","exc_decay","exc_reso","vel_level","vel_color" },
     { "a_model","a_struct","a_decay","a_damp","a_pos","a_tone","a_tune","a_tension" },
     { "b_model","b_struct","b_decay","b_damp","b_pos","b_tone","b_tune","b_tension" },
     { "couple","balance","glide","amp_attack","amp_release","spread","drive","level" },
-    { "rev_mix","rev_size","rev_damp","dly_mix","dly_time","dly_fb","dly_tone","width" }
+    { "rev_mix","rev_size","rev_damp","dly_mix","dly_time","dly_fb","dly_tone","width" },
+    { "eq_tone","eq_body","cho_mix","cho_rate","cho_depth","comp_amt","lim_drive","lim_ceil" },
+    { "lfo1_rate","lfo1_depth","lfo1_shape","lfo1_target","lfo2_rate","lfo2_depth","lfo2_shape","lfo2_target" },
+    { "at_preset","at_bright","at_bow","at_cutoff","at_vib","at_bend","at_vrate","at_curve" }
 };
-static const int PAGE_NKNOBS[6] = { 8, 8, 8, 8, 8, 8 };
+static const int PAGE_NKNOBS[9] = { 8, 8, 8, 8, 8, 8, 8, 8, 8 };
 
 /* ── Small helpers ───────────────────────────────────────────────────────────── */
 
@@ -487,6 +507,10 @@ typedef struct {
     float  pan_l, pan_r;
     int    silent;                 /* consecutive near-silent samples */
     int    held;
+    float  pressure, pressure_sm;  /* poly aftertouch (target, smoothed) */
+    float  _pr_shaped;             /* curve-shaped pressure (per block) */
+    float  vib_phase;              /* per-voice vibrato LFO phase */
+    uint32_t bow_rng;              /* re-excitation noise */
 } voice_t;
 
 /* ── Parameter block (also the preset layout) ────────────────────────────────── */
@@ -500,9 +524,18 @@ typedef struct {
     float makeup;   /* per-preset level compensation (not a knob) */
     /* FX extras (defaulted in apply_preset; zero-filled by the preset table). */
     float drive, rev_size, rev_damp, dly_mix, dly_time, dly_fb, dly_tone, width;
-    /* Global filter (preserved across preset loads; see apply_preset). */
+    /* ===== GLOBAL performance params — preserved across preset loads (see
+     * apply_preset; everything from flt_cutoff to the end of the struct). ===== */
     float flt_cutoff, flt_reso; int flt_type, flt_voicing;
+    /* Aftertouch (pressure) routing depths + response curve + AT preset. */
+    float at_bright, at_bow, at_cutoff, at_vib, at_bend, at_vrate, at_curve; int at_preset;
+    /* Two LFOs. */
+    float lfo1_rate, lfo1_depth; int lfo1_shape, lfo1_target;
+    float lfo2_rate, lfo2_depth; int lfo2_shape, lfo2_target;
+    /* Master FX2: EQ (tone/body), chorus (mix/rate/depth), comp, limiter. */
+    float eq_tone, eq_body, cho_mix, cho_rate, cho_depth, comp_amt, lim_drive, lim_ceil;
 } params_t;
+#define GLOBAL_PARAMS_OFF offsetof(params_t, flt_cutoff)
 
 /* ── Simple stereo Schroeder reverb (Space) ──────────────────────────────────── */
 
@@ -642,6 +675,46 @@ static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
     }
 }
 
+/* ── Modulation LFOs ─────────────────────────────────────────────────────────── */
+
+#define N_LFO_SHAPE 5
+#define N_LFO_TGT   8
+static const char *LFO_SHAPE_NAMES[N_LFO_SHAPE] = { "Sine", "Tri", "Saw", "Square", "S&H" };
+static const char *LFO_TGT_NAMES[N_LFO_TGT] =
+    { "Off", "Cutoff", "Pitch", "Couple", "Balance", "Tension", "Tone", "Reso" };
+
+typedef struct { float phase, sh; uint32_t rng; } lfo_t;
+
+/* Advance one block, return bipolar value [-1,1]. rate in Hz. */
+static float lfo_block(lfo_t *l, float rate, int shape, int frames) {
+    l->phase += rate * (float)frames * SR_INV;
+    while (l->phase >= 1.0f) { l->phase -= 1.0f; l->sh = randbi(&l->rng); }
+    float ph = l->phase;
+    switch (shape) {
+        case 0: return sinf(TWO_PI * ph);
+        case 1: return 4.0f * fabsf(ph - 0.5f) - 1.0f;   /* tri */
+        case 2: return 2.0f * ph - 1.0f;                 /* saw */
+        case 3: return ph < 0.5f ? 1.0f : -1.0f;         /* square */
+        default: return l->sh;                            /* S&H */
+    }
+}
+
+/* ── Master FX2 blocks: tilt EQ, chorus, glue comp, lookahead limiter ────────── */
+
+#define CHO_MAX 2048     /* ~46 ms chorus buffer */
+#define LIM_LA  96       /* ~2.2 ms lookahead */
+
+/* Tilt EQ + low-body shelf. State = two one-poles per channel. */
+static inline float eq_process(float x, float *lp1, float *lp2, float tone, float body) {
+    *lp1 += 0.065f * (x - *lp1) + 1e-20f;    /* ~500 Hz split */
+    *lp2 += 0.022f * (x - *lp2) + 1e-20f;    /* ~150 Hz body */
+    float low = *lp1, high = x - *lp1;
+    float tilt = (tone - 0.5f) * 2.0f;       /* -1 dark .. +1 bright */
+    float y = low * (1.0f - tilt) + high * (1.0f + tilt);
+    y += (body - 0.5f) * 1.4f * *lp2;        /* low weight */
+    return y;
+}
+
 /* ── Instance ────────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -659,6 +732,12 @@ typedef struct {
     float    dly_time_smooth;
     filter_ch_t fltL, fltR;         /* global multimode filter (post-synth, pre-FX) */
     params_t sm;                    /* 20 ms-smoothed shadow of p (analog-style) */
+    /* Modulation + master FX2 state. */
+    lfo_t    lfo1, lfo2;
+    float    eq_lpL, eq_lpR, eq_lp2L, eq_lp2R;
+    float    choL[CHO_MAX], choR[CHO_MAX]; int cho_pos; float cho_phase;
+    float    comp_env;
+    float    limL[LIM_LA], limR[LIM_LA]; int lim_pos; float lim_gain;
     int      any_held;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
@@ -736,6 +815,21 @@ static const pdesc_t PDESC[] = {
 
     PF("cutoff","Cutoff",0,1,0.01f,flt_cutoff), PF("resonance","Resonance",0,1,0.01f,flt_reso),
     PI_("ftype","Filter Type",0,N_FTYPE-1,1,flt_type), PI_("voicing","Voicing",0,N_VOICING-1,1,flt_voicing),
+
+    PI_("at_preset","AT Preset",0,9,1,at_preset), PF("at_bright","AT Bright",0,1,0.01f,at_bright),
+    PF("at_bow","AT Bow",0,1,0.01f,at_bow), PF("at_cutoff","AT Cutoff",0,1,0.01f,at_cutoff),
+    PF("at_vib","AT Vib",0,1,0.01f,at_vib), PF("at_bend","AT Bend",0,1,0.01f,at_bend),
+    PF("at_vrate","AT Vib Rate",0,1,0.01f,at_vrate), PF("at_curve","AT Curve",0,1,0.01f,at_curve),
+
+    PF("lfo1_rate","LFO1 Rate",0,1,0.01f,lfo1_rate), PF("lfo1_depth","LFO1 Depth",0,1,0.01f,lfo1_depth),
+    PI_("lfo1_shape","LFO1 Shape",0,N_LFO_SHAPE-1,1,lfo1_shape), PI_("lfo1_target","LFO1 Target",0,N_LFO_TGT-1,1,lfo1_target),
+    PF("lfo2_rate","LFO2 Rate",0,1,0.01f,lfo2_rate), PF("lfo2_depth","LFO2 Depth",0,1,0.01f,lfo2_depth),
+    PI_("lfo2_shape","LFO2 Shape",0,N_LFO_SHAPE-1,1,lfo2_shape), PI_("lfo2_target","LFO2 Target",0,N_LFO_TGT-1,1,lfo2_target),
+
+    PF("eq_tone","Tone",0,1,0.01f,eq_tone), PF("eq_body","Body",0,1,0.01f,eq_body),
+    PF("cho_mix","Chorus",0,1,0.01f,cho_mix), PF("cho_rate","Cho Rate",0,1,0.01f,cho_rate),
+    PF("cho_depth","Cho Depth",0,1,0.01f,cho_depth), PF("comp_amt","Glue",0,1,0.01f,comp_amt),
+    PF("lim_drive","Lim Drive",0,1,0.01f,lim_drive), PF("lim_ceil","Lim Ceil",0,1,0.01f,lim_ceil),
 };
 static const int N_PDESC = (int)(sizeof(PDESC) / sizeof(PDESC[0]));
 
@@ -755,12 +849,12 @@ static inline int *pi_ptr(fizzik_t *inst, const pdesc_t *d) {
 
 static void apply_preset(fizzik_t *inst, int idx) {
     idx = (idx < 0) ? 0 : (idx >= N_PRESETS ? N_PRESETS - 1 : idx);
-    /* Filter is a global master control — keep it across preset changes. */
-    float f_cut = inst->p.flt_cutoff, f_res = inst->p.flt_reso;
-    int   f_typ = inst->p.flt_type,   f_voi = inst->p.flt_voicing;
+    /* Preserve the whole GLOBAL region (filter, aftertouch, LFOs, master FX2)
+     * across preset changes — presets only carry the voice/patch sound. */
+    char gsave[sizeof(params_t) - GLOBAL_PARAMS_OFF];
+    memcpy(gsave, (char *)&inst->p + GLOBAL_PARAMS_OFF, sizeof(gsave));
     inst->p = PRESETS[idx];
-    inst->p.flt_cutoff = f_cut; inst->p.flt_reso = f_res;
-    inst->p.flt_type = f_typ;   inst->p.flt_voicing = f_voi;
+    memcpy((char *)&inst->p + GLOBAL_PARAMS_OFF, gsave, sizeof(gsave));
     if (inst->p.makeup < 1e-6f) inst->p.makeup = 1.0f;
     /* FX aren't in the positional preset table — give them musical defaults
      * (rev_mix comes from the preset's own value above). */
@@ -775,15 +869,32 @@ static void apply_preset(fizzik_t *inst, int idx) {
     inst->preset_idx = idx;
 }
 
+/* Aftertouch preset -> the seven at_* depth params. */
+static void apply_at_preset(fizzik_t *inst, int idx) {
+    idx = (idx < 0) ? 0 : (idx >= N_AT_PRESET ? N_AT_PRESET - 1 : idx);
+    const float *a = AT_PRESETS[idx];
+    inst->p.at_bright=a[0]; inst->p.at_bow=a[1]; inst->p.at_cutoff=a[2];
+    inst->p.at_vib=a[3]; inst->p.at_bend=a[4]; inst->p.at_vrate=a[5]; inst->p.at_curve=a[6];
+    inst->p.at_preset = idx;
+}
+
 static void *create_instance(const char *module_dir, const char *json_defaults) {
     (void)module_dir; (void)json_defaults;
     fizzik_t *inst = (fizzik_t *)calloc(1, sizeof(fizzik_t));
     if (!inst) return NULL;
 
     inst->rng = 0xC0FFEEu;
-    /* Filter defaults: fully open, no resonance, LP, Clean SVF (transparent). */
+    /* Global defaults. Filter: open, LP, Clean SVF (transparent). */
     inst->p.flt_cutoff = 1.0f; inst->p.flt_reso = 0.0f;
     inst->p.flt_type = 0; inst->p.flt_voicing = 0;
+    apply_at_preset(inst, 6);              /* Expressive aftertouch by default */
+    inst->p.lfo1_rate = 0.3f; inst->p.lfo1_depth = 0.0f; inst->p.lfo1_shape = 0; inst->p.lfo1_target = 0;
+    inst->p.lfo2_rate = 0.2f; inst->p.lfo2_depth = 0.0f; inst->p.lfo2_shape = 1; inst->p.lfo2_target = 0;
+    inst->p.eq_tone = 0.5f; inst->p.eq_body = 0.5f;
+    inst->p.cho_mix = 0.0f; inst->p.cho_rate = 0.35f; inst->p.cho_depth = 0.4f;
+    inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.92f;
+    inst->lim_gain = 1.0f;
+    inst->lfo1.rng = 0x9E3779B9u; inst->lfo2.rng = 0x85EBCA6Bu;
     apply_preset(inst, 2);   /* CaveStrings — pleasant default */
     inst->sm = inst->p;      /* prime smoothed shadow (no startup glide) */
     filter_reset(&inst->fltL); filter_reset(&inst->fltR);
@@ -793,6 +904,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     for (int i = 0; i < MAX_VOICES; i++) {
         voice_t *v = &inst->v[i];
         v->exc.rng = 0x1000u + (uint32_t)i * 2654435761u;
+        v->bow_rng = 0x7F4A7C15u + (uint32_t)i * 40503u;
         v->A.model = -1; v->B.model = -1;
         reso_reset(&v->A); reso_reset(&v->B);
         v->pan_l = v->pan_r = 0.70710678f;
@@ -811,6 +923,7 @@ static void voice_start(fizzik_t *inst, voice_t *v, int note, float vel) {
     v->freq = v->freq_target;
     v->amp_env = 0.0f; v->amp_stage = 0;
     v->prevA = v->prevB = 0.0f;
+    v->pressure = 0.0f; v->pressure_sm = 0.0f; v->vib_phase = 0.0f;
     v->silent = 0;
     v->dcA.x1 = v->dcA.y1 = v->dcB.x1 = v->dcB.y1 = 0.0f;
     exciter_note_on(&v->exc);
@@ -843,6 +956,15 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
                 inst->v[i].held = 0;
                 if (inst->v[i].amp_stage < 2) inst->v[i].amp_stage = 2;   /* release */
             }
+    } else if (status == 0xA0) {          /* polyphonic aftertouch (per note) */
+        float pr = vel / 127.0f;
+        for (int i = 0; i < MAX_VOICES; i++)
+            if (inst->v[i].active && inst->v[i].held && inst->v[i].note == note)
+                inst->v[i].pressure = pr;
+    } else if (status == 0xD0) {          /* channel aftertouch (msg[1]=pressure) */
+        float pr = note / 127.0f;
+        for (int i = 0; i < MAX_VOICES; i++)
+            if (inst->v[i].active && inst->v[i].held) inst->v[i].pressure = pr;
     }
 }
 
@@ -903,6 +1025,9 @@ static void set_param(void *instance, const char *key, const char *val) {
         else if (strcmp(val, "ResonB") == 0) inst->current_page = 3;
         else if (strcmp(val, "Voice")  == 0) inst->current_page = 4;
         else if (strcmp(val, "FX")     == 0) inst->current_page = 5;
+        else if (strcmp(val, "FX2")    == 0) inst->current_page = 6;
+        else if (strcmp(val, "Mod")    == 0) inst->current_page = 7;
+        else if (strcmp(val, "Touch")  == 0) inst->current_page = 8;
         return;
     }
 
@@ -918,6 +1043,9 @@ static void set_param(void *instance, const char *key, const char *val) {
             int ni = inst->preset_idx + delta;
             ni = (ni < 0) ? 0 : (ni >= N_PRESETS ? N_PRESETS - 1 : ni);
             apply_preset(inst, ni); return;
+        }
+        if (strcmp(pk, "at_preset") == 0) {
+            apply_at_preset(inst, inst->p.at_preset + delta); return;
         }
         if (strncmp(pk, "rnd_", 4) == 0) {
             if (delta != 0) { if (!strcmp(pk,"rnd_patch")) rnd_patch(inst);
@@ -953,6 +1081,11 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "b_model") == 0) { inst->p.b_model = parse_model(val); return; }
     if (strcmp(key, "ftype")   == 0) { inst->p.flt_type = parse_enum(val, FTYPE_NAMES, N_FTYPE); return; }
     if (strcmp(key, "voicing") == 0) { inst->p.flt_voicing = parse_enum(val, VOICING_NAMES, N_VOICING); return; }
+    if (strcmp(key, "at_preset") == 0)   { apply_at_preset(inst, parse_enum(val, AT_PRESET_NAMES, N_AT_PRESET)); return; }
+    if (strcmp(key, "lfo1_shape") == 0)  { inst->p.lfo1_shape = parse_enum(val, LFO_SHAPE_NAMES, N_LFO_SHAPE); return; }
+    if (strcmp(key, "lfo2_shape") == 0)  { inst->p.lfo2_shape = parse_enum(val, LFO_SHAPE_NAMES, N_LFO_SHAPE); return; }
+    if (strcmp(key, "lfo1_target") == 0) { inst->p.lfo1_target = parse_enum(val, LFO_TGT_NAMES, N_LFO_TGT); return; }
+    if (strcmp(key, "lfo2_target") == 0) { inst->p.lfo2_target = parse_enum(val, LFO_TGT_NAMES, N_LFO_TGT); return; }
 
     /* State restore: newline-separated key=value. */
     if (strcmp(key, "state") == 0) {
@@ -1040,6 +1173,30 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"resonance\",\"name\":\"Resonance\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"ftype\",\"name\":\"Filter Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\",\"Notch\"]},"
           "{\"key\":\"voicing\",\"name\":\"Voicing\",\"type\":\"enum\",\"options\":[\"Clean SVF\",\"SEM\",\"MS-20\",\"Steiner\",\"Ladder 4P\",\"Ladder 2P\",\"Ladder 1P\",\"Prophet\",\"Oberheim\",\"Diode\",\"Sallen-Key\",\"Vintage\"]},"
+          "{\"key\":\"eq_tone\",\"name\":\"Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"eq_body\",\"name\":\"Body\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"cho_mix\",\"name\":\"Chorus\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"cho_rate\",\"name\":\"Cho Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"cho_depth\",\"name\":\"Cho Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"comp_amt\",\"name\":\"Glue\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"lim_drive\",\"name\":\"Lim Drive\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"lim_ceil\",\"name\":\"Lim Ceil\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"lfo1_rate\",\"name\":\"LFO1 Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"lfo1_depth\",\"name\":\"LFO1 Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"lfo1_shape\",\"name\":\"LFO1 Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Tri\",\"Saw\",\"Square\",\"S&H\"]},"
+          "{\"key\":\"lfo1_target\",\"name\":\"LFO1 Target\",\"type\":\"enum\",\"options\":[\"Off\",\"Cutoff\",\"Pitch\",\"Couple\",\"Balance\",\"Tension\",\"Tone\",\"Reso\"]},"
+          "{\"key\":\"lfo2_rate\",\"name\":\"LFO2 Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"lfo2_depth\",\"name\":\"LFO2 Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"lfo2_shape\",\"name\":\"LFO2 Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Tri\",\"Saw\",\"Square\",\"S&H\"]},"
+          "{\"key\":\"lfo2_target\",\"name\":\"LFO2 Target\",\"type\":\"enum\",\"options\":[\"Off\",\"Cutoff\",\"Pitch\",\"Couple\",\"Balance\",\"Tension\",\"Tone\",\"Reso\"]},"
+          "{\"key\":\"at_preset\",\"name\":\"AT Preset\",\"type\":\"enum\",\"options\":[\"Off\",\"Gentle\",\"Brighten\",\"Bow\",\"Swell\",\"Vibrato\",\"Expressive\",\"Cello\",\"Wild\",\"Sforzato\"]},"
+          "{\"key\":\"at_bright\",\"name\":\"AT Bright\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"at_bow\",\"name\":\"AT Bow\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"at_cutoff\",\"name\":\"AT Cutoff\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"at_vib\",\"name\":\"AT Vib\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"at_bend\",\"name\":\"AT Bend\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"at_vrate\",\"name\":\"AT Vib Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"at_curve\",\"name\":\"AT Curve\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\"]},"
           "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
           "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
@@ -1051,12 +1208,15 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         return snprintf(buf, buf_len,
           "{\"modes\":null,\"levels\":{"
           "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],"
-          "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"}]},"
+          "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"FX2\",\"label\":\"FX 2\"},{\"level\":\"Mod\",\"label\":\"Mod\"},{\"level\":\"Touch\",\"label\":\"Aftertouch\"}]},"
           "\"Exciter\":{\"name\":\"Exciter\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],\"params\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"]},"
           "\"ResonA\":{\"name\":\"Reson A\",\"knobs\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"],\"params\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"]},"
           "\"ResonB\":{\"name\":\"Reson B\",\"knobs\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"],\"params\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"]},"
           "\"Voice\":{\"name\":\"Voice\",\"knobs\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"drive\",\"level\"],\"params\":[\"couple\",\"balance\",\"glide\",\"amp_attack\",\"amp_release\",\"spread\",\"drive\",\"level\"]},"
           "\"FX\":{\"name\":\"FX\",\"knobs\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"],\"params\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"]},"
+          "\"FX2\":{\"name\":\"FX 2\",\"knobs\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"],\"params\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"]},"
+          "\"Mod\":{\"name\":\"Mod\",\"knobs\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"],\"params\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"]},"
+          "\"Touch\":{\"name\":\"Aftertouch\",\"knobs\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"],\"params\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"]},"
           "\"Patch\":{\"name\":\"Patch\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"]}"
           "}}");
     }
@@ -1083,6 +1243,11 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(pk, "b_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.b_model & 3]);
         if (strcmp(pk, "ftype")   == 0) return snprintf(buf, buf_len, "%s", FTYPE_NAMES[inst->p.flt_type % N_FTYPE]);
         if (strcmp(pk, "voicing") == 0) return snprintf(buf, buf_len, "%s", VOICING_NAMES[inst->p.flt_voicing % N_VOICING]);
+        if (strcmp(pk, "at_preset") == 0) return snprintf(buf, buf_len, "%s", AT_PRESET_NAMES[inst->p.at_preset % N_AT_PRESET]);
+        if (strcmp(pk, "lfo1_shape") == 0) return snprintf(buf, buf_len, "%s", LFO_SHAPE_NAMES[inst->p.lfo1_shape % N_LFO_SHAPE]);
+        if (strcmp(pk, "lfo2_shape") == 0) return snprintf(buf, buf_len, "%s", LFO_SHAPE_NAMES[inst->p.lfo2_shape % N_LFO_SHAPE]);
+        if (strcmp(pk, "lfo1_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo1_target % N_LFO_TGT]);
+        if (strcmp(pk, "lfo2_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo2_target % N_LFO_TGT]);
         const pdesc_t *d = find_pdesc(pk);
         if (d) {
             if (d->isint) return snprintf(buf, buf_len, "%d", *pi_ptr(inst, d));
@@ -1107,6 +1272,11 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "b_model") == 0) return snprintf(buf, buf_len, "%s", MODEL_NAMES[inst->p.b_model & 3]);
     if (strcmp(key, "ftype")   == 0) return snprintf(buf, buf_len, "%s", FTYPE_NAMES[inst->p.flt_type % N_FTYPE]);
     if (strcmp(key, "voicing") == 0) return snprintf(buf, buf_len, "%s", VOICING_NAMES[inst->p.flt_voicing % N_VOICING]);
+    if (strcmp(key, "at_preset") == 0) return snprintf(buf, buf_len, "%s", AT_PRESET_NAMES[inst->p.at_preset % N_AT_PRESET]);
+    if (strcmp(key, "lfo1_shape") == 0) return snprintf(buf, buf_len, "%s", LFO_SHAPE_NAMES[inst->p.lfo1_shape % N_LFO_SHAPE]);
+    if (strcmp(key, "lfo2_shape") == 0) return snprintf(buf, buf_len, "%s", LFO_SHAPE_NAMES[inst->p.lfo2_shape % N_LFO_SHAPE]);
+    if (strcmp(key, "lfo1_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo1_target % N_LFO_TGT]);
+    if (strcmp(key, "lfo2_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo2_target % N_LFO_TGT]);
     if (strcmp(key, "preset")  == 0) return snprintf(buf, buf_len, "%s", PRESET_NAMES[inst->preset_idx]);
     if (strncmp(key, "rnd_", 4) == 0) return snprintf(buf, buf_len, "0");
 
@@ -1178,6 +1348,44 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     float vel_level  = clampf(s->vel_level, 0.0f, 1.0f);
     float vel_color  = clampf(s->vel_color, 0.0f, 1.0f);
 
+    /* ── Two LFOs → global mod targets ── */
+    float lfo1v = lfo_block(&inst->lfo1, map_exp(s->lfo1_rate + 1e-4f, 0.05f, 20.0f), p->lfo1_shape, frames) * s->lfo1_depth;
+    float lfo2v = lfo_block(&inst->lfo2, map_exp(s->lfo2_rate + 1e-4f, 0.05f, 20.0f), p->lfo2_shape, frames) * s->lfo2_depth;
+    float mod_cut=0, mod_res=0, mod_cpl=0, mod_bal=0, mod_pit=0, mod_ten=0, mod_ton=0;
+    for (int li = 0; li < 2; li++) {
+        float lv = li ? lfo2v : lfo1v; int tg = li ? p->lfo2_target : p->lfo1_target;
+        switch (tg) {
+            case 1: mod_cut += lv * 0.5f; break;   case 2: mod_pit += lv * 4.0f; break;
+            case 3: mod_cpl += lv * 0.5f; break;   case 4: mod_bal += lv * 0.5f; break;
+            case 5: mod_ten += lv * 0.5f; break;   case 6: mod_ton += lv * 0.5f; break;
+            case 7: mod_res += lv * 0.5f; break;   default: break;
+        }
+    }
+    /* ── Aftertouch depths + peak pressure (drives the global cutoff mod) ── */
+    float at_br=s->at_bright, at_bw=s->at_bow, at_ct=s->at_cutoff, at_vb=s->at_vib, at_bd=s->at_bend;
+    float at_vhz=map_exp(s->at_vrate + 1e-4f, 3.0f, 9.0f), at_cv=s->at_curve;
+    float maxpress = 0.0f;
+    for (int vi = 0; vi < MAX_VOICES; vi++)
+        if (inst->v[vi].active && inst->v[vi].pressure_sm > maxpress) maxpress = inst->v[vi].pressure_sm;
+
+    /* Fold global mods into filter / couple / balance. */
+    couple  = clampf(couple  + mod_cpl, 0.0f, 1.0f);
+    balance = clampf(balance + mod_bal, 0.0f, 1.0f);
+    flt_fc  = map_exp(clampf(s->flt_cutoff + mod_cut + at_ct * maxpress, 0.0f, 1.0f), 30.0f, 18000.0f);
+    flt_g   = tanf(PI * clampf(flt_fc, 20.0f, 19500.0f) * SR_INV);
+    flt_res = clampf(flt_res + mod_res, 0.0f, 1.0f);
+
+    /* ── Master FX2 param mapping ── */
+    float eq_tone = clampf(s->eq_tone, 0.0f, 1.0f), eq_body = clampf(s->eq_body, 0.0f, 1.0f);
+    float cho_mix = clampf(s->cho_mix, 0.0f, 1.0f);
+    float cho_inc = map_exp(s->cho_rate + 1e-4f, 0.05f, 6.0f) * SR_INV;
+    float cho_base = 0.012f * SR, cho_amp = clampf(s->cho_depth, 0.0f, 1.0f) * 0.006f * SR;
+    float comp_amt = clampf(s->comp_amt, 0.0f, 1.0f);
+    float comp_thr = 1.0f - comp_amt * 0.7f, comp_mkup = 1.0f + comp_amt * 1.2f;
+    float lim_drv  = 1.0f + clampf(s->lim_drive, 0.0f, 1.0f) * 3.0f;
+    float lim_ceil = 0.5f + clampf(s->lim_ceil, 0.0f, 1.0f) * 0.49f;
+    float lim_att = expf(-1.0f / (0.001f * SR)), lim_rel = expf(-1.0f / (0.06f * SR));
+
     for (int n = 0; n < frames; n++) {
         float mixL = 0.0f, mixR = 0.0f;
 
@@ -1185,24 +1393,41 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             voice_t *v = &inst->v[vi];
             if (!v->active) continue;
 
+            /* Smooth pad pressure (~28 ms). */
+            v->pressure_sm += 0.0008f * (v->pressure - v->pressure_sm);
+
             /* Glide toward target. */
             if (glide_coef > 0.0f) v->freq += (v->freq_target - v->freq) * (1.0f - glide_coef);
             else                   v->freq = v->freq_target;
 
-            /* Per-block resonator retune only on first sample of the block. */
+            /* Per-block resonator retune (with aftertouch + LFO mods). */
             if (n == 0) {
-                float fA = v->freq * powf(2.0f, (float)p->a_tune / 12.0f);
-                float fB = v->freq * powf(2.0f, (float)p->b_tune / 12.0f);
-                reso_set(&v->A, p->a_model & 3, fA, s->a_struct, s->a_decay, s->a_damp, s->a_pos, s->a_tone, s->a_tension);
-                reso_set(&v->B, p->b_model & 3, fB, s->b_struct, s->b_decay, s->b_damp, s->b_pos, s->b_tone, s->b_tension);
+                float pr = v->pressure_sm;
+                pr = (at_cv < 0.5f) ? powf(pr, 1.0f + (0.5f - at_cv) * 3.0f)
+                                    : powf(pr, 1.0f / (1.0f + (at_cv - 0.5f) * 3.0f));
+                v->vib_phase += at_vhz * (float)frames * SR_INV;
+                if (v->vib_phase >= 1.0f) v->vib_phase -= 1.0f;
+                float vib = sinf(TWO_PI * v->vib_phase) * at_vb * pr;
+                float semi = mod_pit + at_bd * pr * 2.0f + vib;          /* bend up to 2 st, vib up to 1 st */
+                float pfac = powf(2.0f, semi / 12.0f);
+                float fA = v->freq * pfac * powf(2.0f, (float)p->a_tune / 12.0f);
+                float fB = v->freq * pfac * powf(2.0f, (float)p->b_tune / 12.0f);
+                float aTone = clampf(s->a_tone + mod_ton + at_br * pr * 0.5f, 0.0f, 1.0f);
+                float bTone = clampf(s->b_tone + mod_ton + at_br * pr * 0.5f, 0.0f, 1.0f);
+                float aTens = clampf(s->a_tension + mod_ten, 0.0f, 1.0f);
+                float bTens = clampf(s->b_tension + mod_ten, 0.0f, 1.0f);
+                reso_set(&v->A, p->a_model & 3, fA, s->a_struct, s->a_decay, s->a_damp, s->a_pos, aTone, aTens);
+                reso_set(&v->B, p->b_model & 3, fB, s->b_struct, s->b_decay, s->b_damp, s->b_pos, bTone, bTens);
+                v->_pr_shaped = pr;
             }
 
-            /* Exciter (velocity links). */
+            /* Exciter (velocity links) + aftertouch bow re-excitation. */
             float vcolor = clampf(s->exc_color + vel_color * (v->velocity - 0.5f), 0.0f, 1.0f);
             float color_cut = map_exp(vcolor, 300.0f, 16000.0f);
             float exc = exciter_process(&v->exc, v->freq, exc_mix, exc_crk, color_cut, exc_reso, exc_atk_ms, exc_dec_ms);
             float vgain = 1.0f - vel_level * (1.0f - v->velocity);
             exc *= vgain;
+            exc += randbi(&v->bow_rng) * at_bw * v->_pr_shaped * 0.35f;   /* bow */
 
             /* Coupled resonators (1-sample cross feedback). */
             float inA = exc + couple * v->prevB;
@@ -1244,6 +1469,29 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             mixR += drive * (ftanh(mixR * drive_g) * drive_cmp - mixR);
         }
 
+        /* Tilt/body EQ. */
+        mixL = eq_process(mixL, &inst->eq_lpL, &inst->eq_lp2L, eq_tone, eq_body);
+        mixR = eq_process(mixR, &inst->eq_lpR, &inst->eq_lp2R, eq_tone, eq_body);
+
+        /* Stereo chorus (modulated short delays, L/R phase-offset for width). */
+        if (cho_mix > 0.001f) {
+            inst->cho_phase += cho_inc; if (inst->cho_phase >= 1.0f) inst->cho_phase -= 1.0f;
+            float ph = inst->cho_phase;
+            float dL = cho_base + cho_amp * (0.5f + 0.5f * sinf(TWO_PI * ph));
+            float dR = cho_base + cho_amp * (0.5f + 0.5f * sinf(TWO_PI * (ph + 0.25f)));
+            float rpL = (float)inst->cho_pos - dL; while (rpL < 0.0f) rpL += CHO_MAX;
+            float rpR = (float)inst->cho_pos - dR; while (rpR < 0.0f) rpR += CHO_MAX;
+            int iL = (int)rpL, iR = (int)rpR;
+            float fL = rpL - iL, fR = rpR - iR;
+            int iL1 = (iL + 1) % CHO_MAX, iR1 = (iR + 1) % CHO_MAX;
+            float wL = inst->choL[iL] + fL * (inst->choL[iL1] - inst->choL[iL]);
+            float wR = inst->choR[iR] + fR * (inst->choR[iR1] - inst->choR[iR]);
+            inst->choL[inst->cho_pos] = mixL; inst->choR[inst->cho_pos] = mixR;
+            inst->cho_pos++; if (inst->cho_pos >= CHO_MAX) inst->cho_pos = 0;
+            mixL += cho_mix * (wL - mixL);
+            mixR += cho_mix * (wR - mixR);
+        }
+
         /* Stereo ping-pong delay (always runs to keep the tail continuous). */
         inst->dly_time_smooth += 0.0006f * (dly_target - inst->dly_time_smooth);
         float rp = (float)inst->dly_pos - inst->dly_time_smooth;
@@ -1276,6 +1524,16 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             sigL = mid + sid; sigR = mid - sid;
         }
 
+        /* Glue compressor (feedforward, stereo-linked, ~4:1). */
+        if (comp_amt > 0.001f) {
+            float pk = fabsf(sigL) > fabsf(sigR) ? fabsf(sigL) : fabsf(sigR);
+            inst->comp_env += ((pk > inst->comp_env) ? 0.01f : 0.0006f) * (pk - inst->comp_env);
+            float cg = comp_mkup;
+            if (inst->comp_env > comp_thr)
+                cg *= (comp_thr + (inst->comp_env - comp_thr) * 0.25f) / (inst->comp_env + 1e-9f);
+            sigL *= cg; sigR *= cg;
+        }
+
         float outL = sigL * level_gain;
         float outR = sigR * level_gain;
 
@@ -1285,8 +1543,19 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         inst->meter_sumsq += (double)outL * outL + (double)outR * outR;
         inst->meter_cnt += 2;
 
-        outL = out_limit(outL);   /* gentle master limiter — polyphony-safe */
+        /* Warm tanh soft-clip, then a lookahead brickwall limiter. */
+        outL = out_limit(outL);
         outR = out_limit(outR);
+        float dL = outL * lim_drv, dR = outR * lim_drv;
+        float lpk = fabsf(dL) > fabsf(dR) ? fabsf(dL) : fabsf(dR);
+        float ltarget = (lpk > lim_ceil && lpk > 0.0f) ? lim_ceil / lpk : 1.0f;
+        if (ltarget < inst->lim_gain) inst->lim_gain = lim_att * inst->lim_gain + (1.0f - lim_att) * ltarget;
+        else                          inst->lim_gain = lim_rel * inst->lim_gain + (1.0f - lim_rel) * ltarget;
+        float delL = inst->limL[inst->lim_pos], delR = inst->limR[inst->lim_pos];
+        inst->limL[inst->lim_pos] = dL; inst->limR[inst->lim_pos] = dR;
+        inst->lim_pos++; if (inst->lim_pos >= LIM_LA) inst->lim_pos = 0;
+        outL = clampf(delL * inst->lim_gain, -lim_ceil, lim_ceil);
+        outR = clampf(delR * inst->lim_gain, -lim_ceil, lim_ceil);
         int32_t sl = (int32_t)(clampf(outL, -1.0f, 1.0f) * 32767.0f);
         int32_t sr = (int32_t)(clampf(outR, -1.0f, 1.0f) * 32767.0f);
         out_lr[n * 2]     = (int16_t)sl;

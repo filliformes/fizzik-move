@@ -25,7 +25,10 @@
             {"level": "ResonA", "label": "Reson A"},
             {"level": "ResonB", "label": "Reson B"},
             {"level": "Voice", "label": "Voice"},
-            {"level": "FX", "label": "FX"}
+            {"level": "FX", "label": "FX"},
+            {"level": "FX2", "label": "FX 2"},
+            {"level": "Mod", "label": "Mod"},
+            {"level": "Touch", "label": "Aftertouch"}
           ]
         },
         "Exciter": {
@@ -52,6 +55,21 @@
           "name": "FX",
           "knobs": ["rev_mix", "rev_size", "rev_damp", "dly_mix", "dly_time", "dly_fb", "dly_tone", "width"],
           "params": ["rev_mix", "rev_size", "rev_damp", "dly_mix", "dly_time", "dly_fb", "dly_tone", "width"]
+        },
+        "FX2": {
+          "name": "FX 2",
+          "knobs": ["eq_tone", "eq_body", "cho_mix", "cho_rate", "cho_depth", "comp_amt", "lim_drive", "lim_ceil"],
+          "params": ["eq_tone", "eq_body", "cho_mix", "cho_rate", "cho_depth", "comp_amt", "lim_drive", "lim_ceil"]
+        },
+        "Mod": {
+          "name": "Mod",
+          "knobs": ["lfo1_rate", "lfo1_depth", "lfo1_shape", "lfo1_target", "lfo2_rate", "lfo2_depth", "lfo2_shape", "lfo2_target"],
+          "params": ["lfo1_rate", "lfo1_depth", "lfo1_shape", "lfo1_target", "lfo2_rate", "lfo2_depth", "lfo2_shape", "lfo2_target"]
+        },
+        "Touch": {
+          "name": "Aftertouch",
+          "knobs": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"],
+          "params": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"]
         },
         "Patch": {
           "name": "Patch",
@@ -110,6 +128,33 @@
       {"key": "resonance", "name": "Resonance", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "ftype", "name": "Filter Type", "type": "enum", "options": ["LP", "HP", "BP", "Notch"]},
       {"key": "voicing", "name": "Voicing", "type": "enum", "options": ["Clean SVF", "SEM", "MS-20", "Steiner", "Ladder 4P", "Ladder 2P", "Ladder 1P", "Prophet", "Oberheim", "Diode", "Sallen-Key", "Vintage"]},
+
+      {"key": "eq_tone", "name": "Tone", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "eq_body", "name": "Body", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "cho_mix", "name": "Chorus", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "cho_rate", "name": "Cho Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "cho_depth", "name": "Cho Depth", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "comp_amt", "name": "Glue", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "lim_drive", "name": "Lim Drive", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "lim_ceil", "name": "Lim Ceil", "type": "float", "min": 0, "max": 1, "step": 0.01},
+
+      {"key": "lfo1_rate", "name": "LFO1 Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "lfo1_depth", "name": "LFO1 Depth", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "lfo1_shape", "name": "LFO1 Shape", "type": "enum", "options": ["Sine", "Tri", "Saw", "Square", "S&H"]},
+      {"key": "lfo1_target", "name": "LFO1 Target", "type": "enum", "options": ["Off", "Cutoff", "Pitch", "Couple", "Balance", "Tension", "Tone", "Reso"]},
+      {"key": "lfo2_rate", "name": "LFO2 Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "lfo2_depth", "name": "LFO2 Depth", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "lfo2_shape", "name": "LFO2 Shape", "type": "enum", "options": ["Sine", "Tri", "Saw", "Square", "S&H"]},
+      {"key": "lfo2_target", "name": "LFO2 Target", "type": "enum", "options": ["Off", "Cutoff", "Pitch", "Couple", "Balance", "Tension", "Tone", "Reso"]},
+
+      {"key": "at_preset", "name": "AT Preset", "type": "enum", "options": ["Off", "Gentle", "Brighten", "Bow", "Swell", "Vibrato", "Expressive", "Cello", "Wild", "Sforzato"]},
+      {"key": "at_bright", "name": "AT Bright", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "at_bow", "name": "AT Bow", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "at_cutoff", "name": "AT Cutoff", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "at_vib", "name": "AT Vib", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "at_bend", "name": "AT Bend", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "at_vrate", "name": "AT Vib Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "at_curve", "name": "AT Curve", "type": "float", "min": 0, "max": 1, "step": 0.01},
 
       {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle", "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad", "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum", "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine"]},
       {"key": "rnd_patch", "name": "Rnd Patch", "type": "int", "min": 0, "max": 127, "step": 1},

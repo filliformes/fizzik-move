@@ -35,6 +35,30 @@ Modal core = bank of ≤24 RBJ band-pass biquads, recomputed only when pitch/str
 4. **Reson B**: b_* (same eight)
 5. **Voice**: couple, balance, glide, amp_attack, amp_release, spread, drive, level
 6. **FX**: rev_mix, rev_size, rev_damp, dly_mix, dly_time, dly_fb, dly_tone, width
+7. **FX2**: eq_tone, eq_body, cho_mix, cho_rate, cho_depth, comp_amt, lim_drive, lim_ceil
+8. **Mod**: lfo1_rate/depth/shape/target, lfo2_rate/depth/shape/target
+9. **Aftertouch (Touch)**: at_preset (10), at_bright, at_bow, at_cutoff, at_vib, at_bend, at_vrate, at_curve
+
+## Global params & the GLOBAL region
+`params_t` splits at `GLOBAL_PARAMS_OFF` (= offsetof flt_cutoff). Everything from there
+(filter, aftertouch, LFOs, FX2) is a **global performance layer**: `apply_preset` memcpy-saves
+that whole region, loads the preset, then restores it — so presets only carry the voice sound;
+filter/aftertouch/mod/master-FX persist across preset changes. State round-trips all of it.
+
+## Poly aftertouch (Move 0xA0)
+Per-voice `pressure` (smoothed ~28ms, shaped by `at_curve`) drives, scaled by the at_* depths:
+brightness (adds to resonator tone at retune), **bow** (noise re-excitation into the voice —
+plucks bloom into sustains), cutoff (peak pressure → global filter), vibrato + bend (per-voice
+pitch at block-rate retune). 10 AT presets (`AT_PRESETS`) set all seven depths at once via
+`apply_at_preset`. Also handles channel AT (0xD0).
+
+## Modulation (2 LFOs) + master FX2
+Two block-rate LFOs (`lfo_block`, sine/tri/saw/square/S&H) → targets {Off,Cutoff,Pitch,Couple,
+Balance,Tension,Tone,Reso}, summed into per-block mod accumulators. FX2 = tilt/body EQ
+(`eq_process`), stereo chorus, glue compressor, and a **lookahead brickwall limiter** (2ms/
+`LIM_LA`, drive+ceiling, after the warm `out_limit` tanh) — reimplemented clean-room from
+MechanOdd's Limiter design (odoare/FxmeFX, LGPL — studied, not copied). Master chain order:
+filter → drive → EQ → chorus → delay → reverb → width → glue → tanh → lookahead limiter.
 
 ## Level calibration & FX
 - Per-voice output halved (`level_gain = level²·0.7·makeup`) + gentle master limiter
