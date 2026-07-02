@@ -1011,7 +1011,7 @@ static void rnd_one_reso(fizzik_t *inst, int isB) {
      * octave above the played note. */
     float str = randf(s) * randf(s) * 0.7f;              /* skew low: 0..0.7, mostly < 0.35 */
     if (mdl == MODEL_BEAM) str *= 0.5f;                  /* beam's n^2 partials get screechy fast */
-    float dec = 0.35f + 0.45f * randf(s);                /* 0.35..0.80 */
+    float dec = 0.3f + 0.4f * randf(s);                  /* 0.30..0.70: limit loud long rings */
     float dmp = 0.55f + 0.35f * randf(s);                /* 0.55..0.90: solid HF damping */
     float pos = 0.2f + 0.6f * randf(s);
     float tone = 0.2f + 0.3f * randf(s);                 /* 0.20..0.50: never piercing */
@@ -1027,7 +1027,9 @@ static void rnd_patch(fizzik_t *inst) {
     rnd_exciter(inst); rnd_reson(inst);
     inst->p.couple = randf(&inst->rng) * 0.45f;          /* keep coupling from self-oscillating */
     inst->p.balance = 0.35f + 0.3f * randf(&inst->rng);
-    inst->p.makeup = 1.0f;   /* rely on per-resonator auto-level */
+    /* Random patches read hot, worst with high coupling (feedback reinforces both
+     * resonators). Scale makeup down with the coupling amount to flatten the loud tail. */
+    inst->p.makeup = 0.62f - inst->p.couple * 0.6f;      /* couple 0->0.62, 0.45->0.35 */
 }
 
 /* Request a randomize: fade out first (render applies it while silent, then fades
@@ -1365,7 +1367,7 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     float amp_rel_ms  = map_exp(s->amp_release, 20.0f, 3000.0f);
     float atk_inc     = 1.0f / (amp_atk_ms * 0.001f * SR);
     float rel_coef    = expf(-1.0f / (amp_rel_ms * 0.001f * SR));
-    float level_gain  = s->level * s->level * 0.7f * p->makeup;   /* halved for headroom */
+    float level_gain  = s->level * s->level * 0.525f * p->makeup;  /* 0.75x master + headroom */
     /* Global filter. */
     float flt_fc   = map_exp(clampf(s->flt_cutoff, 0.0f, 1.0f), 30.0f, 18000.0f);
     float flt_g    = tanf(PI * clampf(flt_fc, 20.0f, 19500.0f) * SR_INV);
