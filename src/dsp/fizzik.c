@@ -47,25 +47,28 @@
 #define MODEL_PLATE    2
 #define MODEL_MEMBRANE 3
 
-#define N_PRESETS     16
+#define N_PRESETS     30
 
 static const char *MODEL_NAMES[4]  = { "String", "Beam", "Plate", "Membrane" };
 static const char *PRESET_NAMES[N_PRESETS] = {
     "AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass",
     "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow",
-    "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle"
+    "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle",
+    "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad",
+    "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum",
+    "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine"
 };
 
 /* Page-aware knob overlay: keys per page (index = current_page). */
 static const char *PAGE_KEYS[6][8] = {
+    { "preset","rnd_patch","rnd_exc","rnd_reson","","","","" },
     { "exc_mix","exc_crackle","exc_color","exc_attack","exc_decay","exc_reso","vel_level","vel_color" },
     { "a_model","a_struct","a_decay","a_damp","a_pos","a_tone","a_tune","a_tension" },
     { "b_model","b_struct","b_decay","b_damp","b_pos","b_tone","b_tune","b_tension" },
     { "couple","balance","glide","amp_attack","amp_release","spread","drive","level" },
-    { "rev_mix","rev_size","rev_damp","dly_mix","dly_time","dly_fb","dly_tone","width" },
-    { "preset","rnd_patch","rnd_exc","rnd_reson","","","","" }
+    { "rev_mix","rev_size","rev_damp","dly_mix","dly_time","dly_fb","dly_tone","width" }
 };
-static const int PAGE_NKNOBS[6] = { 8, 8, 8, 8, 8, 4 };
+static const int PAGE_NKNOBS[6] = { 4, 8, 8, 8, 8, 8 };
 
 /* ── Small helpers ───────────────────────────────────────────────────────────── */
 
@@ -79,10 +82,14 @@ static inline float note_to_freq(float note) {
     return 440.0f * powf(2.0f, (note - 69.0f) / 12.0f);
 }
 static inline float sanitize(float x) { return isfinite(x) ? x : 0.0f; }
-static inline float soft_limit(float x) { /* ceiling ~+12 dBFS */
+static inline float soft_limit(float x) { /* ceiling ~+12 dBFS (coupling guard) */
     if (!isfinite(x)) return 0.0f;
     const float c = 4.0f;
     return c * tanhf(x * (1.0f / c));
+}
+static inline float out_limit(float x) { /* gentle master limiter, ceiling ~0.9 */
+    if (!isfinite(x)) return 0.0f;
+    return 0.9f * tanhf(x * 1.1111f);
 }
 
 /* xorshift RNG -> [0,1) */
@@ -559,12 +566,12 @@ typedef struct {
     couple,balance,glide,ampA,ampR,spread,space,level, makeup} — makeup baked from offline meter (peak->0.8) */
 static const params_t PRESETS[N_PRESETS] = {
   /* AlienChurch */    {0.2f,0.1f,0.7f,0.05f,0.4f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.9f,0.5f,0.5f,0.7f,0,0.0f, MODEL_PLATE,0.4f,0.85f,0.4f,0.4f,0.6f,7,0.0f, 0.35f,0.5f,0.2f,0.3f,0.7f,0.6f,0.6f,0.6f, 0.323f},
-  /* BowedGlass */     {0.0f,0.0f,0.5f,0.4f,0.6f,0.2f,0.2f,0.3f, MODEL_PLATE,0.3f,0.95f,0.6f,0.4f,0.6f,0,0.0f, MODEL_PLATE,0.5f,0.9f,0.5f,0.5f,0.7f,12,0.0f, 0.5f,0.5f,0.1f,0.5f,0.6f,0.5f,0.5f,0.55f, 0.778f},
+  /* BowedGlass */     {0.0f,0.0f,0.5f,0.4f,0.6f,0.2f,0.2f,0.3f, MODEL_PLATE,0.3f,0.95f,0.6f,0.4f,0.6f,0,0.0f, MODEL_PLATE,0.5f,0.9f,0.5f,0.5f,0.7f,12,0.0f, 0.5f,0.5f,0.1f,0.5f,0.6f,0.5f,0.5f,0.55f, 0.779f},
   /* CaveStrings */    {0.1f,0.05f,0.6f,0.1f,0.5f,0.4f,0.4f,0.3f, MODEL_STRING,0.2f,0.85f,0.4f,0.15f,0.6f,0,0.2f, MODEL_STRING,0.1f,0.8f,0.5f,0.25f,0.55f,-12,0.15f, 0.3f,0.5f,0.15f,0.05f,0.5f,0.6f,0.7f,0.6f, 1.048f},
   /* CouncilsPiano */  {0.6f,0.0f,0.75f,0.01f,0.15f,0.2f,0.6f,0.5f, MODEL_STRING,0.35f,0.75f,0.6f,0.2f,0.7f,0,0.25f, MODEL_BEAM,0.15f,0.7f,0.6f,0.5f,0.65f,12,0.0f, 0.15f,0.35f,0.0f,0.02f,0.4f,0.4f,0.35f,0.6f, 2.172f},
   /* DistortedBass */  {0.4f,0.2f,0.4f,0.01f,0.2f,0.6f,0.7f,0.4f, MODEL_STRING,0.0f,0.7f,0.3f,0.3f,0.4f,-12,0.6f, MODEL_STRING,0.05f,0.65f,0.4f,0.35f,0.35f,-12,0.7f, 0.55f,0.5f,0.05f,0.02f,0.35f,0.3f,0.2f,0.7f, 1.755f},
-  /* FeedbackHarp */   {0.2f,0.1f,0.65f,0.02f,0.25f,0.5f,0.5f,0.5f, MODEL_STRING,0.15f,0.92f,0.5f,0.4f,0.7f,0,0.3f, MODEL_STRING,0.2f,0.9f,0.55f,0.6f,0.6f,7,0.35f, 0.7f,0.5f,0.1f,0.03f,0.5f,0.55f,0.5f,0.55f, 1.630f},
-  /* JudgementAwaits */{0.15f,0.15f,0.55f,0.08f,0.5f,0.35f,0.3f,0.4f, MODEL_PLATE,0.7f,0.9f,0.6f,0.45f,0.5f,-12,0.0f, MODEL_MEMBRANE,0.5f,0.88f,0.5f,0.5f,0.45f,0,0.0f, 0.45f,0.5f,0.2f,0.2f,0.8f,0.6f,0.75f,0.6f, 0.356f},
+  /* FeedbackHarp */   {0.2f,0.1f,0.65f,0.02f,0.25f,0.5f,0.5f,0.5f, MODEL_STRING,0.15f,0.92f,0.5f,0.4f,0.7f,0,0.3f, MODEL_STRING,0.2f,0.9f,0.55f,0.6f,0.6f,7,0.35f, 0.62f,0.5f,0.1f,0.03f,0.5f,0.55f,0.5f,0.55f, 2.271f},
+  /* JudgementAwaits */{0.15f,0.15f,0.55f,0.08f,0.5f,0.35f,0.3f,0.4f, MODEL_PLATE,0.7f,0.85f,0.6f,0.45f,0.5f,-12,0.0f, MODEL_MEMBRANE,0.5f,0.83f,0.5f,0.5f,0.45f,0,0.0f, 0.38f,0.5f,0.2f,0.2f,0.75f,0.6f,0.75f,0.6f, 0.373f},
   /* OldResonances */  {0.1f,0.1f,0.5f,0.1f,0.55f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.4f,0.85f,0.55f,0.5f,0.6f,0,0.0f, MODEL_PLATE,0.6f,0.8f,0.45f,0.4f,0.55f,5,0.0f, 0.4f,0.5f,0.15f,0.15f,0.65f,0.6f,0.65f,0.6f, 0.381f},
   /* PreparedPiano */  {0.5f,0.35f,0.7f,0.01f,0.18f,0.3f,0.6f,0.5f, MODEL_STRING,0.4f,0.7f,0.55f,0.25f,0.7f,0,0.2f, MODEL_MEMBRANE,0.3f,0.6f,0.6f,0.4f,0.5f,12,0.0f, 0.4f,0.45f,0.0f,0.02f,0.4f,0.45f,0.35f,0.62f, 0.613f},
   /* RythmicBow */     {0.05f,0.05f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_STRING,0.25f,0.9f,0.45f,0.3f,0.6f,0,0.25f, MODEL_PLATE,0.4f,0.85f,0.5f,0.45f,0.6f,7,0.0f, 0.55f,0.5f,0.1f,0.3f,0.55f,0.5f,0.5f,0.55f, 0.423f},
@@ -573,7 +580,21 @@ static const params_t PRESETS[N_PRESETS] = {
   /* ShockingPluck */  {0.55f,0.1f,0.7f,0.005f,0.12f,0.4f,0.75f,0.6f, MODEL_STRING,0.3f,0.72f,0.6f,0.2f,0.75f,0,0.4f, MODEL_STRING,0.2f,0.68f,0.6f,0.3f,0.7f,0,0.45f, 0.25f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.65f, 1.086f},
   /* Slappy */         {0.35f,0.25f,0.6f,0.005f,0.1f,0.5f,0.7f,0.5f, MODEL_MEMBRANE,0.3f,0.55f,0.6f,0.4f,0.45f,0,0.0f, MODEL_STRING,0.1f,0.6f,0.5f,0.3f,0.4f,-12,0.5f, 0.3f,0.45f,0.0f,0.01f,0.3f,0.45f,0.25f,0.68f, 0.297f},
   /* SurroundedByBells*/{0.4f,0.05f,0.8f,0.01f,0.3f,0.25f,0.5f,0.5f, MODEL_PLATE,0.8f,0.92f,0.55f,0.5f,0.75f,12,0.0f, MODEL_PLATE,0.5f,0.9f,0.6f,0.45f,0.7f,19,0.0f, 0.35f,0.5f,0.1f,0.02f,0.7f,0.65f,0.7f,0.55f, 0.591f},
-  /* XyloStyle */      {0.6f,0.0f,0.85f,0.005f,0.12f,0.2f,0.65f,0.55f, MODEL_BEAM,0.9f,0.6f,0.7f,0.35f,0.8f,0,0.0f, MODEL_BEAM,0.7f,0.55f,0.75f,0.45f,0.75f,12,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.62f, 2.006f},
+  /* XyloStyle */      {0.6f,0.0f,0.85f,0.005f,0.12f,0.2f,0.65f,0.55f, MODEL_BEAM,0.9f,0.6f,0.7f,0.35f,0.8f,0,0.0f, MODEL_BEAM,0.7f,0.55f,0.75f,0.45f,0.75f,12,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.5f,0.3f,0.62f, 2.007f},
+  /* GlassKalimba */   {0.45f,0.05f,0.78f,0.005f,0.13f,0.25f,0.65f,0.55f, MODEL_BEAM,0.5f,0.62f,0.45f,0.6f,0.78f,12,0.0f, MODEL_PLATE,0.3f,0.6f,0.5f,0.5f,0.72f,12,0.0f, 0.2f,0.45f,0.0f,0.01f,0.4f,0.55f,0.45f,0.6f, 0.471f},
+  /* IronLullaby */    {0.05f,0.02f,0.55f,0.35f,0.55f,0.25f,0.3f,0.35f, MODEL_PLATE,0.5f,0.9f,0.55f,0.5f,0.55f,0,0.0f, MODEL_MEMBRANE,0.4f,0.86f,0.55f,0.5f,0.5f,7,0.0f, 0.4f,0.5f,0.15f,0.35f,0.75f,0.6f,0.6f,0.55f, 3.248f},
+  /* TidalGong */      {0.1f,0.03f,0.5f,0.05f,0.5f,0.3f,0.35f,0.35f, MODEL_MEMBRANE,0.7f,0.85f,0.6f,0.4f,0.45f,-12,0.0f, MODEL_PLATE,0.6f,0.83f,0.55f,0.45f,0.5f,-5,0.0f, 0.33f,0.5f,0.2f,0.05f,0.8f,0.65f,0.7f,0.5f, 0.844f},
+  /* HollowReed */     {0.05f,0.02f,0.55f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_PLATE,0.4f,0.88f,0.45f,0.6f,0.6f,0,0.0f, MODEL_STRING,0.2f,0.86f,0.5f,0.6f,0.62f,12,0.1f, 0.45f,0.5f,0.1f,0.3f,0.5f,0.5f,0.5f,0.55f, 0.518f},
+  /* StarlightPad */   {0.1f,0.05f,0.6f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.5f,0.86f,0.55f,0.5f,0.55f,12,0.0f, MODEL_PLATE,0.5f,0.85f,0.5f,0.55f,0.6f,19,0.0f, 0.3f,0.5f,0.2f,0.4f,0.78f,0.7f,0.75f,0.5f, 0.732f},
+  /* BrokenMusicBox */ {0.55f,0.08f,0.8f,0.005f,0.12f,0.2f,0.6f,0.55f, MODEL_BEAM,0.7f,0.62f,0.45f,0.7f,0.8f,12,0.0f, MODEL_BEAM,0.85f,0.58f,0.5f,0.6f,0.75f,13,0.0f, 0.15f,0.5f,0.0f,0.01f,0.35f,0.55f,0.45f,0.6f, 8.700f},
+  /* DeepDiveBass */   {0.4f,0.1f,0.42f,0.008f,0.2f,0.5f,0.7f,0.4f, MODEL_STRING,0.05f,0.66f,0.35f,0.4f,0.45f,-24,0.4f, MODEL_STRING,0.1f,0.6f,0.4f,0.4f,0.4f,-12,0.3f, 0.3f,0.45f,0.05f,0.01f,0.35f,0.3f,0.2f,0.6f, 1.379f},
+  /* CopperTongue */   {0.45f,0.05f,0.72f,0.006f,0.14f,0.3f,0.65f,0.5f, MODEL_BEAM,0.4f,0.72f,0.4f,0.6f,0.7f,0,0.0f, MODEL_PLATE,0.35f,0.7f,0.5f,0.5f,0.66f,12,0.0f, 0.35f,0.5f,0.0f,0.01f,0.45f,0.5f,0.5f,0.6f, 0.901f},
+  /* GhostSitar */     {0.35f,0.12f,0.68f,0.008f,0.2f,0.45f,0.6f,0.5f, MODEL_STRING,0.3f,0.82f,0.4f,0.72f,0.7f,0,0.55f, MODEL_STRING,0.35f,0.8f,0.45f,0.68f,0.66f,7,0.5f, 0.4f,0.5f,0.05f,0.01f,0.5f,0.55f,0.5f,0.55f, 3.521f},
+  /* MarbleDrum */     {0.35f,0.15f,0.6f,0.005f,0.1f,0.4f,0.7f,0.45f, MODEL_MEMBRANE,0.3f,0.55f,0.55f,0.45f,0.5f,0,0.0f, MODEL_MEMBRANE,0.5f,0.5f,0.55f,0.4f,0.45f,-7,0.0f, 0.3f,0.5f,0.0f,0.01f,0.3f,0.45f,0.35f,0.6f, 0.372f},
+  /* WhisperHarp */    {0.15f,0.05f,0.62f,0.01f,0.3f,0.4f,0.55f,0.5f, MODEL_STRING,0.15f,0.82f,0.45f,0.7f,0.65f,12,0.1f, MODEL_STRING,0.1f,0.8f,0.5f,0.65f,0.6f,0,0.05f, 0.25f,0.5f,0.05f,0.01f,0.45f,0.6f,0.55f,0.55f, 0.834f},
+  /* TitaniumBell */   {0.4f,0.03f,0.82f,0.008f,0.2f,0.25f,0.55f,0.5f, MODEL_PLATE,0.75f,0.9f,0.5f,0.55f,0.8f,12,0.0f, MODEL_PLATE,0.6f,0.88f,0.48f,0.5f,0.75f,24,0.0f, 0.3f,0.5f,0.1f,0.01f,0.7f,0.6f,0.65f,0.5f, 0.843f},
+  /* FrozenLake */     {0.1f,0.05f,0.6f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.85f,0.5f,0.5f,0.55f,12,0.0f, MODEL_PLATE,0.5f,0.85f,0.48f,0.55f,0.62f,7,0.0f, 0.3f,0.5f,0.25f,0.4f,0.7f,0.7f,0.8f,0.5f, 0.354f},
+  /* PulseEngine */    {0.35f,0.15f,0.6f,0.008f,0.18f,0.45f,0.65f,0.5f, MODEL_STRING,0.2f,0.75f,0.35f,0.5f,0.6f,0,0.4f, MODEL_BEAM,0.5f,0.7f,0.45f,0.5f,0.6f,-12,0.0f, 0.55f,0.5f,0.0f,0.01f,0.4f,0.5f,0.3f,0.55f, 1.035f},
 };
 
 /* ── Parameter descriptor table (float/int fields of params_t) ───────────────── */
@@ -625,7 +646,7 @@ static inline int *pi_ptr(fizzik_t *inst, const pdesc_t *d) {
 /* ── Lifecycle ───────────────────────────────────────────────────────────────── */
 
 static void apply_preset(fizzik_t *inst, int idx) {
-    if (idx < 0) idx = 0; if (idx >= N_PRESETS) idx = N_PRESETS - 1;
+    idx = (idx < 0) ? 0 : (idx >= N_PRESETS ? N_PRESETS - 1 : idx);
     inst->p = PRESETS[idx];
     if (inst->p.makeup < 1e-6f) inst->p.makeup = 1.0f;
     /* FX aren't in the positional preset table — give them musical defaults
@@ -753,12 +774,12 @@ static void set_param(void *instance, const char *key, const char *val) {
 
     /* Page navigation. */
     if (strcmp(key, "_level") == 0 || strcmp(key, "current_level") == 0) {
-        if      (strcmp(val, "Exciter") == 0 || strcmp(val, "root") == 0 || strcmp(val, "Fizzik") == 0) inst->current_page = 0;
-        else if (strcmp(val, "ResonA") == 0) inst->current_page = 1;
-        else if (strcmp(val, "ResonB") == 0) inst->current_page = 2;
-        else if (strcmp(val, "Voice")  == 0) inst->current_page = 3;
-        else if (strcmp(val, "FX")     == 0) inst->current_page = 4;
-        else if (strcmp(val, "Patch")  == 0) inst->current_page = 5;
+        if      (strcmp(val, "Patch") == 0 || strcmp(val, "root") == 0 || strcmp(val, "Fizzik") == 0) inst->current_page = 0;
+        else if (strcmp(val, "Exciter") == 0) inst->current_page = 1;
+        else if (strcmp(val, "ResonA") == 0) inst->current_page = 2;
+        else if (strcmp(val, "ResonB") == 0) inst->current_page = 3;
+        else if (strcmp(val, "Voice")  == 0) inst->current_page = 4;
+        else if (strcmp(val, "FX")     == 0) inst->current_page = 5;
         return;
     }
 
@@ -772,7 +793,7 @@ static void set_param(void *instance, const char *key, const char *val) {
         /* triggers / preset handled by name below */
         if (strcmp(pk, "preset") == 0) {
             int ni = inst->preset_idx + delta;
-            if (ni < 0) ni = 0; if (ni >= N_PRESETS) ni = N_PRESETS - 1;
+            ni = (ni < 0) ? 0 : (ni >= N_PRESETS ? N_PRESETS - 1 : ni);
             apply_preset(inst, ni); return;
         }
         if (strncmp(pk, "rnd_", 4) == 0) {
@@ -788,6 +809,9 @@ static void set_param(void *instance, const char *key, const char *val) {
         }
         return;
     }
+
+    /* Hidden calibration hook: override makeup gain. */
+    if (strcmp(key, "__makeup") == 0) { inst->p.makeup = (float)atof(val); return; }
 
     /* Triggers (direct set by key). */
     if (strncmp(key, "rnd_", 4) == 0) {
@@ -819,7 +843,8 @@ static void set_param(void *instance, const char *key, const char *val) {
                     if (strcmp(k, "state") != 0) set_param(inst, k, v);
                 }
             }
-            if (!*eol) break; pp = eol + 1;
+            if (!*eol) break;
+            pp = eol + 1;
         }
         return;
     }
@@ -886,7 +911,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"dly_fb\",\"name\":\"Dly Fbk\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"dly_tone\",\"name\":\"Dly Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"width\",\"name\":\"Width\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\"]},"
+          "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\"]},"
           "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
           "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
           "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1}"
@@ -896,8 +921,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "ui_hierarchy") == 0) {
         return snprintf(buf, buf_len,
           "{\"modes\":null,\"levels\":{"
-          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],"
-          "\"params\":[{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"Patch\",\"label\":\"Patch\"}]},"
+          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\"],"
+          "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"}]},"
           "\"Exciter\":{\"name\":\"Exciter\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],\"params\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"]},"
           "\"ResonA\":{\"name\":\"Reson A\",\"knobs\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"],\"params\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"]},"
           "\"ResonB\":{\"name\":\"Reson B\",\"knobs\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"],\"params\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"]},"
@@ -977,7 +1002,7 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     float amp_rel_ms  = map_exp(p->amp_release, 20.0f, 3000.0f);
     float atk_inc     = 1.0f / (amp_atk_ms * 0.001f * SR);
     float rel_coef    = expf(-1.0f / (amp_rel_ms * 0.001f * SR));
-    float level_gain  = p->level * p->level * 1.4f * p->makeup;
+    float level_gain  = p->level * p->level * 0.7f * p->makeup;   /* halved for headroom */
     /* FX params. */
     float rev_mix   = clampf(p->rev_mix, 0.0f, 1.0f);
     float rev_fb    = 0.60f + 0.38f * clampf(p->rev_size, 0.0f, 1.0f);   /* 0.60..0.98 */
@@ -1104,8 +1129,8 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         inst->meter_sumsq += (double)outL * outL + (double)outR * outR;
         inst->meter_cnt += 2;
 
-        outL = soft_limit(outL);
-        outR = soft_limit(outR);
+        outL = out_limit(outL);   /* gentle master limiter — polyphony-safe */
+        outR = out_limit(outR);
         int32_t sl = (int32_t)(clampf(outL, -1.0f, 1.0f) * 32767.0f);
         int32_t sr = (int32_t)(clampf(outR, -1.0f, 1.0f) * 32767.0f);
         out_lr[n * 2]     = (int16_t)sl;

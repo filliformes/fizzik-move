@@ -18,14 +18,14 @@
       "levels": {
         "root": {
           "name": "Fizzik",
-          "knobs": ["exc_mix", "exc_crackle", "exc_color", "exc_attack", "exc_decay", "exc_reso", "vel_level", "vel_color"],
+          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson"],
           "params": [
+            {"level": "Patch", "label": "Patch"},
             {"level": "Exciter", "label": "Exciter"},
             {"level": "ResonA", "label": "Reson A"},
             {"level": "ResonB", "label": "Reson B"},
             {"level": "Voice", "label": "Voice"},
-            {"level": "FX", "label": "FX"},
-            {"level": "Patch", "label": "Patch"}
+            {"level": "FX", "label": "FX"}
           ]
         },
         "Exciter": {
@@ -106,7 +106,7 @@
       {"key": "dly_tone", "name": "Dly Tone", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "width", "name": "Width", "type": "float", "min": 0, "max": 1, "step": 0.01},
 
-      {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle"]},
+      {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle", "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad", "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum", "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine"]},
       {"key": "rnd_patch", "name": "Rnd Patch", "type": "int", "min": 0, "max": 127, "step": 1},
       {"key": "rnd_exc", "name": "Rnd Exciter", "type": "int", "min": 0, "max": 127, "step": 1},
       {"key": "rnd_reson", "name": "Rnd Reson", "type": "int", "min": 0, "max": 127, "step": 1}

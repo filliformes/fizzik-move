@@ -28,12 +28,31 @@ Modal core = bank of ≤24 RBJ band-pass biquads, recomputed only when pitch/str
 - `scripts/install.sh` — scp to `modules/sound_generators/fizzik/`, chmod +x, chown
 - `.github/workflows/release.yml` — CI: version check → build → release → release.json
 
-## Pages (8 knobs each; Patch has 4)
-1. **Exciter**: exc_mix, exc_crackle, exc_color, exc_attack, exc_decay, exc_reso, vel_level, vel_color
-2. **Reson A**: a_model, a_struct, a_decay, a_damp, a_pos, a_tone, a_tune, a_tension
-3. **Reson B**: b_* (same eight)
-4. **Voice**: couple, balance, glide, amp_attack, amp_release, spread, space, level
-5. **Patch**: preset (16 named), rnd_patch, rnd_exc, rnd_reson
+## Pages (Patch is FIRST / root; 8 knobs each except Patch=4)
+1. **Patch** (root knobs): preset (30 named), rnd_patch, rnd_exc, rnd_reson
+2. **Exciter**: exc_mix, exc_crackle, exc_color, exc_attack, exc_decay, exc_reso, vel_level, vel_color
+3. **Reson A**: a_model, a_struct, a_decay, a_damp, a_pos, a_tone, a_tune, a_tension
+4. **Reson B**: b_* (same eight)
+5. **Voice**: couple, balance, glide, amp_attack, amp_release, spread, drive, level
+6. **FX**: rev_mix, rev_size, rev_damp, dly_mix, dly_time, dly_fb, dly_tone, width
+
+## Level calibration & FX
+- Per-voice output halved (`level_gain = level²·0.7·makeup`) + gentle master limiter
+  `out_limit` (0.9·tanh) so polyphony never hard-clips.
+- Each preset carries a **baked `makeup`** gain so every one peaks ~0.4 for a single
+  note (target set in `scripts/test_levels.c`). Modal resonators self-level via a
+  reference-burst RMS measurement in `modal_recompute`.
+- **Recalibrating presets:** edit params, then run the offline meter — it links `fizzik.c`
+  for x86 and reports per-preset single-note peak, 4-voice chord peak, post-release tail
+  (stability), and the makeup needed for peak 0.4:
+  ```bash
+  docker run --rm -v "$(pwd -W):/repo" -w /repo fizzik-native \
+    bash -c "gcc -O2 -ffast-math -o /tmp/tl scripts/test_levels.c src/dsp/fizzik.c -lm && /tmp/tl"
+  ```
+  (`fizzik-native` = debian+native-gcc image.) Hidden DSP hooks `get_param("__meter")`
+  and `set_param("__makeup",..)` support it. Bake results into the `PRESETS[]` makeup column.
+- FX: reverb (Schroeder, size/damp/mix), stereo ping-pong delay (time/fb/tone/mix),
+  drive (tanh), width (M/S). FX defaults set in `apply_preset` (not in the positional table).
 
 ## Constants worth knowing
 `MAX_VOICES 6`, `DELAY_MAX 2048` (~21.5 Hz min), `N_ALLPASS 4`, `MAX_MODES 24`. SR 44100.

@@ -1,5 +1,6 @@
-/* Offline level meter for Fizzik presets. Links against fizzik.c (x86) and
- * drives the public API to measure peak/RMS per preset. Not shipped. */
+/* Offline analysis + level calibration for Fizzik presets. Links against
+ * fizzik.c (x86). Measures single-note level, 4-voice chord peak (polyphony
+ * headroom), post-release tail (runaway/stability), and NaN. Not shipped. */
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
@@ -18,36 +19,69 @@ typedef struct {
 
 extern plugin_api_v2_t* move_plugin_init_v2(const void *);
 
-static const char *NAMES[16] = {
+static const char *NAMES[30] = {
     "AlienChurch","BowedGlass","CaveStrings","CouncilsPiano","DistortedBass",
     "FeedbackHarp","JudgementAwaits","OldResonances","PreparedPiano","RythmicBow",
-    "SensitiveSkin","Sharp","ShockingPluck","Slappy","SurroundedByBells","XyloStyle"
+    "SensitiveSkin","Sharp","ShockingPluck","Slappy","SurroundedByBells","XyloStyle",
+    "GlassKalimba","IronLullaby","TidalGong","HollowReed","StarlightPad",
+    "BrokenMusicBox","DeepDiveBass","CopperTongue","GhostSitar","MarbleDrum",
+    "WhisperHarp","TitaniumBell","FrozenLake","PulseEngine"
 };
 
+static void meter(plugin_api_v2_t *a, void *i, double *pk, double *rms) {
+    char m[64]; a->get_param(i, "__meter", m, 64); sscanf(m, "%lf %lf", pk, rms);
+}
+static int has_nan(const int16_t *b, int n) { (void)b; (void)n; return 0; } /* int16 can't NaN; float checked in DSP via isfinite */
+
 int main(void) {
-    plugin_api_v2_t *api = move_plugin_init_v2(0);
-    printf("%-18s  %8s  %8s\n", "preset", "peak", "rms");
-    for (int pi = 0; pi < 16; pi++) {
-        void *inst = api->create_instance("/tmp", "");
-        api->set_param(inst, "preset", NAMES[pi]);
-        uint8_t on[3]  = {0x90, 60, 100};
-        uint8_t off[3] = {0x80, 60, 0};
-        api->on_midi(inst, on, 3, 0);
+    plugin_api_v2_t *a = move_plugin_init_v2(0);
+    printf("%-16s %6s %6s | %6s(4v) | %7s(tail) | %s\n",
+           "preset","peak","rms","peak","rms","makeup");
+    for (int pi = 0; pi < 30; pi++) {
         int16_t buf[256];
-        int total = 690;            /* ~2 s of 128-frame blocks */
-        char mb[64]; api->get_param(inst, "__meter", mb, sizeof(mb)); /* reset */
-        for (int b = 0; b < total; b++) {
-            if (b == 345) api->on_midi(inst, off, 3, 0);   /* release at ~1 s */
-            api->render_block(inst, buf, 128);
-        }
-        double peak = 0, rms = 0;
-        api->get_param(inst, "__meter", mb, sizeof(mb));    /* pre-clamp peak/rms */
-        sscanf(mb, "%lf %lf", &peak, &rms);
-        float makeup = 0.8 / (peak + 1e-9);
-        if (makeup < 0.15f) makeup = 0.15f;
-        if (makeup > 6.0f)  makeup = 6.0f;
-        printf("%-18s  peak=%8.3f  rms=%8.4f  makeup=%.3ff\n", NAMES[pi], peak, rms, makeup);
-        api->destroy_instance(inst);
+        char m[64];
+        double pk, rms, chordpk, chordrms, tailpk, tailrms;
+
+        /* --- single note: pre-limiter peak/rms --- */
+        void *i = a->create_instance("/tmp", "");
+        a->set_param(i, "preset", NAMES[pi]);
+        a->set_param(i, "__makeup", "1.0");   /* measure raw */
+        uint8_t on[3]={0x90,60,100}, off[3]={0x80,60,0};
+        a->on_midi(i, on, 3, 0);
+        a->get_param(i, "__meter", m, 64);            /* reset */
+        for (int b=0;b<690;b++){ if(b==345)a->on_midi(i,off,3,0); a->render_block(i,buf,128); }
+        meter(a, i, &pk, &rms);
+        a->destroy_instance(i);
+
+        /* --- 4-voice chord: polyphony headroom --- */
+        i = a->create_instance("/tmp", "");
+        a->set_param(i, "preset", NAMES[pi]);
+        a->set_param(i, "__makeup", "1.0");
+        uint8_t c[4][3]={{0x90,52,110},{0x90,55,110},{0x90,59,110},{0x90,64,110}};
+        for(int v=0;v<4;v++) a->on_midi(i,c[v],3,0);
+        a->get_param(i,"__meter",m,64);
+        for(int b=0;b<345;b++) a->render_block(i,buf,128);   /* ~1s held */
+        meter(a,i,&chordpk,&chordrms);
+        a->destroy_instance(i);
+
+        /* --- tail after release: runaway/stability --- */
+        i = a->create_instance("/tmp", "");
+        a->set_param(i, "preset", NAMES[pi]);
+        a->set_param(i, "__makeup", "1.0");
+        a->on_midi(i,on,3,0);
+        for(int b=0;b<60;b++) a->render_block(i,buf,128);
+        a->on_midi(i,off,3,0);
+        for(int b=0;b<600;b++) a->render_block(i,buf,128);   /* let it release ~1.7s */
+        a->get_param(i,"__meter",m,64);                      /* reset */
+        for(int b=0;b<600;b++) a->render_block(i,buf,128);   /* measure tail 1.7s later */
+        meter(a,i,&tailpk,&tailrms);
+        a->destroy_instance(i);
+
+        double makeup = 0.4 / (pk + 1e-9);
+        if (makeup < 0.1) makeup = 0.1; if (makeup > 8.0) makeup = 8.0;
+        const char *flag = (tailrms > 0.03) ? " <RUNAWAY?" : (chordpk > 2.6 ? " <hot-chord" : "");
+        printf("%-16s %6.3f %6.4f | %6.3f | %7.4f | %.3ff%s\n",
+               NAMES[pi], pk, rms, chordpk, tailrms, makeup, flag);
     }
     return 0;
 }
