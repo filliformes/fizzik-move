@@ -1245,9 +1245,9 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"at_vrate\",\"name\":\"AT Vib Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"at_curve\",\"name\":\"AT Curve\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\"]},"
-          "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
-          "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
-          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1}"
+          "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
+          "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
+          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1}"
           "]");
     }
 
