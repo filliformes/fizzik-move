@@ -39,7 +39,6 @@
 #define MAX_MODES     24        /* modal bank size */
 #define MAX_CAND      256       /* modal candidate scratch */
 
-#define FIRST_NOTE    36        /* Move pad base (used only for modulo mapping) */
 #define REF_FREQ      261.626f  /* middle C — pitch normalization reference */
 
 #define MODEL_STRING   0
@@ -437,9 +436,16 @@ static void reso_reset(resonator_t *r) {
     modal_reset(&r->modal);
 }
 
-/* Update coefficients each block. f0 already includes the resonator's tune. */
+/* Update coefficients each block. f0 already includes the resonator's tune.
+ * `rebuild_budget` rate-limits EXPENSIVE full modal rebuilds (qsort + 4096-sample
+ * norm measurement) per render block: a smoothed struct-knob sweep with 6 held
+ * modal voices would otherwise trigger up to 12 rebuilds in one 2.9 ms block
+ * (CPU spike -> dropout). Over-budget rebuilds defer to the next block (params
+ * are still gliding, so convergence just staggers). Initial builds (no mode set
+ * yet, f0<0) bypass the budget — a silent resonator is worse than a spike. */
 static void reso_set(resonator_t *r, int model, float f0, float mstruct,
-                     float decay, float damp, float pos, float tone, float tension) {
+                     float decay, float damp, float pos, float tone, float tension,
+                     int *rebuild_budget) {
     if (model != r->model) {
         r->model = model;
         if (model == MODEL_STRING) wg_reset(&r->wg);
@@ -450,15 +456,18 @@ static void reso_set(resonator_t *r, int model, float f0, float mstruct,
         r->wg.pos = clampf(0.02f + 0.9f * pos, 0.02f, 0.98f);
     } else {
         modal_t *m = &r->modal;
-        int struct_dirty = (m->f0 < 0.0f)
+        int initial = (m->f0 < 0.0f);
+        int struct_dirty = initial
             || fabsf(m->mstruct - mstruct) > 1e-3f
             || fabsf(m->mdecay - decay)   > 1e-3f
             || fabsf(m->mdamp - damp)     > 1e-3f
             || fabsf(m->mpos - pos)       > 1e-3f;
-        if (struct_dirty)
+        if (struct_dirty && (initial || *rebuild_budget > 0)) {
+            if (!initial) (*rebuild_budget)--;
             modal_recompute(m, model, f0, mstruct, decay, damp, pos);   /* full rebuild */
-        else if (fabsf(m->f0 - f0) > 0.01f)
+        } else if (!initial && fabsf(m->f0 - f0) > 0.01f) {
             modal_retune(m, f0);   /* cheap pitch glide — no state reset, no re-measure */
+        }
     }
 }
 
@@ -745,7 +754,6 @@ static inline float eq_process(float x, float *lp1, float *lp2, float tone, floa
 typedef struct {
     params_t p;
     voice_t  v[MAX_VOICES];
-    int      voice_cursor;
     int      current_page;
     int      preset_idx;
     uint32_t rng;
@@ -763,10 +771,11 @@ typedef struct {
     float    choL[CHO_MAX], choR[CHO_MAX]; int cho_pos; float cho_phase;
     float    comp_env;
     float    limL[LIM_LA], limR[LIM_LA]; int lim_pos; float lim_gain;
-    /* Randomize duck: fade out -> hold silent while the (deferred) randomize is
-     * applied -> fade back in, so the param/model change never clicks. */
-    float    rnd_gain; int rnd_phase, pending_rnd, rnd_hold;
-    int      any_held;
+    /* Randomize/preset duck: fade out -> hold silent while the (deferred)
+     * randomize/preset change is applied -> fade back in — never clicks. */
+    float    rnd_gain; int rnd_phase, pending_rnd, rnd_hold, pending_preset;
+    /* Reverb send DC guard (one-pole HPF state). */
+    float    rev_send_lp;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
 } fizzik_t;
@@ -926,6 +935,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.35f;
     inst->lim_gain = 1.0f;
     inst->rnd_gain = 1.0f;   /* rnd_phase / pending_rnd = 0 (idle) from calloc */
+    inst->pending_preset = -1;   /* calloc 0 would mean "preset 0 pending" */
     inst->lfo1.rng = 0x9E3779B9u; inst->lfo2.rng = 0x85EBCA6Bu;
     apply_preset(inst, 2);   /* CaveStrings — pleasant default */
     inst->sm = inst->p;      /* prime smoothed shadow (no startup glide) */
@@ -971,16 +981,32 @@ static void voice_start(fizzik_t *inst, voice_t *v, int note, float vel) {
 static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
     (void)source;
     fizzik_t *inst = (fizzik_t *)instance;
-    if (len < 3) return;
+    if (len < 2) return;
     uint8_t status = msg[0] & 0xF0;
+    /* Channel aftertouch is a 2-byte message (status + pressure) — handle it
+     * before requiring a 3rd byte. */
+    if (status == 0xD0) {
+        float pr = msg[1] / 127.0f;
+        for (int i = 0; i < MAX_VOICES; i++)
+            if (inst->v[i].active && inst->v[i].held) inst->v[i].pressure = pr;
+        return;
+    }
+    if (len < 3) return;
     int note = msg[1];
     int vel  = msg[2];
 
     if (status == 0x90 && vel > 0) {
-        /* find free voice, else steal via round-robin cursor */
+        /* Find a free voice; else steal the QUIETEST (prefer released voices) —
+         * stealing a loud ringing voice hard-cuts it to zero in one sample. */
         int slot = -1;
         for (int i = 0; i < MAX_VOICES; i++) if (!inst->v[i].active) { slot = i; break; }
-        if (slot < 0) { slot = inst->voice_cursor; inst->voice_cursor = (slot + 1) % MAX_VOICES; }
+        if (slot < 0) {
+            float best = 1e9f;
+            for (int i = 0; i < MAX_VOICES; i++) {
+                float score = inst->v[i].amp_env + (inst->v[i].held ? 10.0f : 0.0f);
+                if (score < best) { best = score; slot = i; }
+            }
+        }
         voice_start(inst, &inst->v[slot], note, vel / 127.0f);
     } else if (status == 0x80 || (status == 0x90 && vel == 0)) {
         for (int i = 0; i < MAX_VOICES; i++)
@@ -993,10 +1019,6 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
         for (int i = 0; i < MAX_VOICES; i++)
             if (inst->v[i].active && inst->v[i].held && inst->v[i].note == note)
                 inst->v[i].pressure = pr;
-    } else if (status == 0xD0) {          /* channel aftertouch (msg[1]=pressure) */
-        float pr = note / 127.0f;
-        for (int i = 0; i < MAX_VOICES; i++)
-            if (inst->v[i].active && inst->v[i].held) inst->v[i].pressure = pr;
     }
 }
 
@@ -1117,6 +1139,16 @@ static void trigger_rnd(fizzik_t *inst, int which) {
     if (inst->rnd_phase != 0) return;
     inst->pending_rnd = which; inst->rnd_phase = 1;
 }
+/* Preset changes get the same click guard: update the index (display / knob
+ * chaining) immediately, defer the actual param apply to the silent point of
+ * the duck. Rapid scrolling just retargets the pending index — the latest one
+ * wins when the fade bottoms out. */
+static void trigger_preset(fizzik_t *inst, int idx) {
+    idx = (idx < 0) ? 0 : (idx >= N_PRESETS ? N_PRESETS - 1 : idx);
+    inst->preset_idx = idx;
+    inst->pending_preset = idx;
+    if (inst->rnd_phase == 0 || inst->rnd_phase == 2) inst->rnd_phase = 1;
+}
 /* Clear each voice's cross-coupling feedback + DC-blocker so the newly-tuned
  * resonators don't get a transient kick from the old loop state (a click source
  * that survives the output fade). Only for resonator-changing randomizes. */
@@ -1128,12 +1160,15 @@ static void reset_voice_coupling(fizzik_t *inst) {
     }
 }
 static void apply_pending_rnd(fizzik_t *inst) {
+    int had_preset = (inst->pending_preset >= 0);
+    if (had_preset) { apply_preset(inst, inst->pending_preset); inst->pending_preset = -1; }
     int which = inst->pending_rnd;
     if      (which == 1) rnd_patch(inst);
     else if (which == 2) rnd_exciter(inst);
     else if (which == 3) rnd_reson(inst);
     else if (which == 4) rnd_all(inst);
-    if (which != 2) reset_voice_coupling(inst);   /* exciter doesn't touch resonators */
+    if (had_preset || (which != 0 && which != 2))
+        reset_voice_coupling(inst);   /* exciter doesn't touch resonators */
     inst->pending_rnd = 0;
 }
 
@@ -1181,9 +1216,8 @@ static void set_param(void *instance, const char *key, const char *val) {
         int delta = atoi(val);
         /* triggers / preset handled by name below */
         if (strcmp(pk, "preset") == 0) {
-            int ni = inst->preset_idx + delta;
-            ni = (ni < 0) ? 0 : (ni >= N_PRESETS ? N_PRESETS - 1 : ni);
-            apply_preset(inst, ni); return;
+            trigger_preset(inst, inst->preset_idx + delta);   /* click-guarded apply */
+            return;
         }
         if (strcmp(pk, "at_preset") == 0) {
             apply_at_preset(inst, inst->p.at_preset + delta); return;
@@ -1219,8 +1253,8 @@ static void set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "preset") == 0) {
-        for (int i = 0; i < N_PRESETS; i++) if (strcmp(val, PRESET_NAMES[i]) == 0) { apply_preset(inst, i); return; }
-        apply_preset(inst, atoi(val)); return;
+        for (int i = 0; i < N_PRESETS; i++) if (strcmp(val, PRESET_NAMES[i]) == 0) { trigger_preset(inst, i); return; }
+        trigger_preset(inst, atoi(val)); return;
     }
     if (strcmp(key, "a_model") == 0) { inst->p.a_model = parse_model(val); return; }
     if (strcmp(key, "b_model") == 0) { inst->p.b_model = parse_model(val); return; }
@@ -1407,6 +1441,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "state") == 0) {
         int n = 0;
         for (int i = 0; i < N_PDESC; i++) {
+            if (n > buf_len - 48) break;   /* guard: never pass snprintf a negative size */
             const pdesc_t *d = &PDESC[i];
             if (d->isint) n += snprintf(buf + n, buf_len - n, "%s=%d\n", d->key, *pi_ptr(inst, d));
             else          n += snprintf(buf + n, buf_len - n, "%s=%.5f\n", d->key, (double)*pf_ptr(inst, d));
@@ -1533,6 +1568,8 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     float lim_ceil = 0.5f + clampf(s->lim_ceil, 0.0f, 1.0f) * 0.49f;
     float lim_att = expf(-1.0f / (0.001f * SR)), lim_rel = expf(-1.0f / (0.06f * SR));
 
+    int rebuild_budget = 2;   /* max expensive modal rebuilds this block (see reso_set) */
+
     for (int n = 0; n < frames; n++) {
         float mixL = 0.0f, mixR = 0.0f;
 
@@ -1563,8 +1600,8 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                 float bTone = clampf(s->b_tone + mod_ton + at_br * pr * 0.5f, 0.0f, 1.0f);
                 float aTens = clampf(s->a_tension + mod_ten, 0.0f, 1.0f);
                 float bTens = clampf(s->b_tension + mod_ten, 0.0f, 1.0f);
-                reso_set(&v->A, p->a_model & 3, fA, s->a_struct, s->a_decay, s->a_damp, s->a_pos, aTone, aTens);
-                reso_set(&v->B, p->b_model & 3, fB, s->b_struct, s->b_decay, s->b_damp, s->b_pos, bTone, bTens);
+                reso_set(&v->A, p->a_model & 3, fA, s->a_struct, s->a_decay, s->a_damp, s->a_pos, aTone, aTens, &rebuild_budget);
+                reso_set(&v->B, p->b_model & 3, fB, s->b_struct, s->b_decay, s->b_damp, s->b_pos, bTone, bTens, &rebuild_budget);
                 v->_pr_shaped = pr;
             }
 
@@ -1655,9 +1692,12 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
         float sigL = mixL + dwL * dly_mix;
         float sigR = mixR + dwR * dly_mix;
 
-        /* Reverb (mono send, stereo return). */
+        /* Reverb (mono send, stereo return). HPF ~25 Hz on the send: at fb 0.98
+         * the comb DC gain is ~50x, so any DC leak would pump the tail. */
         if (rev_mix > 0.001f) {
             float send = (sigL + sigR) * 0.5f;
+            inst->rev_send_lp += 0.0035f * (send - inst->rev_send_lp) + 1e-20f;
+            send -= inst->rev_send_lp;
             float wL = reverb_ch(&inst->rvL, send, rev_fb, rev_damp);
             float wR = reverb_ch(&inst->rvR, send, rev_fb, rev_damp);
             sigL += wL * rev_mix;
