@@ -1009,11 +1009,11 @@ static void rnd_exciter(fizzik_t *inst) {
      * moderate+ decay, not-too-dark color, moderate mix. Keeps variety, kills the
      * near-silent outliers. */
     inst->p.exc_mix    = 0.15f + 0.7f * randf(s);          /* 0.15..0.85 */
-    inst->p.exc_crackle = randf(s) * randf(s) * 0.6f;      /* occasional, low */
-    inst->p.exc_color  = 0.35f + 0.5f * randf(s);          /* 0.35..0.85: not too dark */
+    inst->p.exc_crackle = randf(s) * randf(s) * 0.3f;      /* occasional, low — broadband HF clicks */
+    inst->p.exc_color  = 0.32f + 0.38f * randf(s);         /* 0.32..0.70: bright noise = screech fuel */
     inst->p.exc_attack = randf(s) * randf(s) * 0.3f;       /* short: reaches full amplitude */
     inst->p.exc_decay  = 0.35f + 0.5f * randf(s);          /* 0.35..0.85: enough energy */
-    inst->p.exc_reso   = randf(s) * 0.5f;
+    inst->p.exc_reso   = randf(s) * 0.35f;                 /* a resonant exciter peak can whistle */
     inst->p.vel_level  = randf(s) * 0.6f; inst->p.vel_color = randf(s) * 0.6f;
 }
 static void rnd_one_reso(fizzik_t *inst, int isB) {
@@ -1024,13 +1024,17 @@ static void rnd_one_reso(fizzik_t *inst, int isB) {
      * modest decay, darker tone, and bias tune DOWN so resonators never ring an
      * octave above the played note. */
     float str = randf(s) * randf(s) * 0.7f;              /* skew low: 0..0.7, mostly < 0.35 */
-    if (mdl == MODEL_BEAM) str *= 0.5f;                  /* beam's n^2 partials get screechy fast */
+    /* Beam AND Plate have quadratic frequency laws (f ~ n^2) — their high partials
+     * scream fast, so cap structure hard for both. Membrane (sqrt law) is mellow. */
+    if (mdl == MODEL_BEAM || mdl == MODEL_PLATE) str *= 0.45f;
     float dec = 0.52f + 0.28f * randf(s);                /* 0.52..0.80: sustained -> consistent loudness */
-    float dmp = 0.25f + 0.4f * randf(s);                 /* 0.25..0.65: enough ring to stay audible
-                                                          * (high damp = near-silent; screech is held
-                                                          * off by the tone<=0.5 / tune<=0 caps). */
+    /* Damp is THE modal brightness control (tone isn't used by modal models):
+     * give modal models a higher damping floor so HF partials always decay, but
+     * keep the waveguide lower (its damp cuts output level, not just screech). */
+    float dmp = (mdl == MODEL_STRING) ? 0.25f + 0.35f * randf(s)   /* 0.25..0.60 */
+                                      : 0.40f + 0.30f * randf(s);  /* 0.40..0.70 */
     float pos = 0.12f + 0.33f * randf(s);                /* 0.12..0.45: high pos combs to silence */
-    float tone = 0.2f + 0.3f * randf(s);                 /* 0.20..0.50: never piercing */
+    float tone = 0.15f + 0.27f * randf(s);               /* 0.15..0.42: never piercing (waveguide LP) */
     int tune = (int)(randf(s) * 13.0f) - 12;             /* -12..0: never above the played note */
     float tens = (mdl <= MODEL_BEAM) ? randf(s) * 0.35f : 0.0f;
     if (!isB) { inst->p.a_model=mdl; inst->p.a_struct=str; inst->p.a_decay=dec; inst->p.a_damp=dmp;
@@ -1058,26 +1062,47 @@ static void rnd_all(fizzik_t *inst) {
     rnd_patch(inst);                                     /* voice (+ makeup) */
     inst->p.rev_mix  = randf(s) * randf(s);
     inst->p.rev_size = 0.3f + 0.5f * randf(s);
-    inst->p.rev_damp = 0.3f + 0.5f * randf(s);
+    inst->p.rev_damp = 0.45f + 0.4f * randf(s);          /* darker tails: bright wash = screech */
     inst->p.dly_mix  = randf(s) * randf(s) * 0.7f;
     inst->p.dly_time = randf(s);
     inst->p.dly_fb   = randf(s) * 0.6f;
-    inst->p.dly_tone = randf(s);
-    inst->p.drive    = randf(s) * randf(s) * 0.5f;       /* mild */
+    inst->p.dly_tone = 0.15f + 0.5f * randf(s);          /* 0.15..0.65: echoes never bright */
+    inst->p.drive    = randf(s) * randf(s) * 0.25f;      /* tanh creates HF harmonics — keep tiny */
     inst->p.width    = 0.3f + 0.5f * randf(s);
-    inst->p.flt_cutoff  = 0.5f + 0.5f * randf(s);
-    inst->p.flt_reso    = randf(s) * randf(s) * 0.5f;    /* low: avoid self-osc screech */
-    /* Filter type weighted LP-heavy: HP thins/quiets the sound, so make it rare. */
+    /* Filter type weighted LP-heavy. NO HP (outlier dumps show even low-cutoff HP
+     * strips the body and reads screechy); Notch kept rare. */
     { float fr = randf(s);
-      inst->p.flt_type = (fr < 0.55f) ? 0 : (fr < 0.80f) ? 2 : (fr < 0.93f) ? 3 : 1; }  /* 55% LP,25% BP,13% Notch,7% HP */
+      inst->p.flt_type = (fr < 0.70f) ? 0 : (fr < 0.90f) ? 2 : 3; }  /* 70% LP, 20% BP, 10% Notch */
+    /* Cutoff range is TYPE-aware: LP can sit high (it removes HF anyway), but
+     * BP/Notch/HP at a high cutoff park the output in the 3-7 kHz screech band
+     * (or strip the lows so only highs remain) — keep them low, with less reso. */
+    if (inst->p.flt_type == 0) {
+        inst->p.flt_cutoff = 0.35f + 0.4f * randf(s);    /* LP: 0.35..0.75 */
+        inst->p.flt_reso   = randf(s) * randf(s) * 0.4f;
+    } else {
+        inst->p.flt_cutoff = 0.22f + 0.3f * randf(s);    /* BP/Notch/HP: 0.22..0.52 */
+        inst->p.flt_reso   = randf(s) * randf(s) * 0.25f;
+    }
     inst->p.flt_voicing = rnd_i(s, N_VOICING);
+    /* LFO targets weighted AWAY from Tone/Reso (those push brightness/resonance
+     * unpredictably — screech fuel): mostly Off/Cutoff/Couple/Balance. */
+    {
+        static const int TGT_POOL[10] = { 0, 0, 1, 1, 2, 3, 3, 4, 4, 5 };  /* Tone/Reso excluded */
+        inst->p.lfo1_target = TGT_POOL[rnd_i(s, 10)];
+        inst->p.lfo2_target = TGT_POOL[rnd_i(s, 10)];
+    }
     inst->p.lfo1_rate = randf(s) * 0.5f; inst->p.lfo1_depth = randf(s) * randf(s) * 0.5f;
-    inst->p.lfo1_shape = rnd_i(s, N_LFO_SHAPE); inst->p.lfo1_target = rnd_i(s, N_LFO_TGT);
+    inst->p.lfo1_shape = rnd_i(s, N_LFO_SHAPE);
     inst->p.lfo2_rate = randf(s) * 0.4f; inst->p.lfo2_depth = randf(s) * randf(s) * 0.4f;
-    inst->p.lfo2_shape = rnd_i(s, N_LFO_SHAPE); inst->p.lfo2_target = rnd_i(s, N_LFO_TGT);
+    inst->p.lfo2_shape = rnd_i(s, N_LFO_SHAPE);
     apply_at_preset(inst, rnd_i(s, N_AT_PRESET));
-    inst->p.eq_tone = 0.35f + 0.3f * randf(s); inst->p.eq_body = 0.35f + 0.3f * randf(s);
-    inst->p.cho_mix = randf(s) * randf(s); inst->p.cho_rate = randf(s); inst->p.cho_depth = randf(s);
+    /* EQ tilt biased neutral-to-dark (bright tilt = screech amplifier). */
+    inst->p.eq_tone = 0.28f + 0.26f * randf(s); inst->p.eq_body = 0.4f + 0.3f * randf(s);
+    /* Chorus: fast + deep = FM sidebands = metallic HF (confirmed in outlier
+     * dumps). Keep rate modest and make depth shrink as rate rises. */
+    inst->p.cho_mix   = randf(s) * randf(s);
+    inst->p.cho_rate  = randf(s) * 0.5f;
+    inst->p.cho_depth = randf(s) * (0.6f - inst->p.cho_rate * 0.6f);   /* fast -> shallow */
     inst->p.comp_amt = randf(s) * 0.5f;
 }
 
