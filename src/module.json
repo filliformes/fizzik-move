@@ -29,52 +29,100 @@
             {"level": "FX2", "label": "FX 2"},
             {"level": "Mod", "label": "Mod"},
             {"level": "Touch", "label": "Aftertouch"}
-          ]
+          ,
+            { "key": "rnd_patch", "short_name": "Patch" },
+            { "key": "rnd_exc", "short_name": "Exciter" },
+            { "key": "rnd_reson", "short_name": "Reson" },
+            { "key": "rnd_all", "short_name": "All" },
+            { "key": "ftype", "short_name": "Filter" }]
         },
         "Exciter": {
           "name": "Exciter",
           "knobs": ["exc_mix", "exc_crackle", "exc_color", "exc_attack", "exc_decay", "exc_reso", "vel_level", "vel_color"],
-          "params": ["exc_mix", "exc_crackle", "exc_color", "exc_attack", "exc_decay", "exc_reso", "vel_level", "vel_color"]
+          "params": ["exc_mix", "exc_crackle", "exc_color", "exc_attack", "exc_decay", "exc_reso", "vel_level", "vel_color",
+        { "key": "exc_mix", "short_name": "Mix" },
+        { "key": "exc_reso", "short_name": "Reso" },
+        { "key": "vel_level", "short_name": "Level" }]
         },
         "ResonA": {
           "name": "Reson A",
           "knobs": ["a_model", "a_struct", "a_decay", "a_damp", "a_pos", "a_tone", "a_tune", "a_tension"],
-          "params": ["a_model", "a_struct", "a_decay", "a_damp", "a_pos", "a_tone", "a_tune", "a_tension"]
+          "params": ["a_model", "a_struct", "a_decay", "a_damp", "a_pos", "a_tone", "a_tune", "a_tension",
+        { "key": "a_model", "short_name": "Model" },
+        { "key": "a_struct", "short_name": "Stru" },
+        { "key": "a_tension", "short_name": "Tens" }]
         },
         "ResonB": {
           "name": "Reson B",
           "knobs": ["b_model", "b_struct", "b_decay", "b_damp", "b_pos", "b_tone", "b_tune", "b_tension"],
-          "params": ["b_model", "b_struct", "b_decay", "b_damp", "b_pos", "b_tone", "b_tune", "b_tension"]
+          "params": ["b_model", "b_struct", "b_decay", "b_damp", "b_pos", "b_tone", "b_tune", "b_tension",
+        { "key": "b_model", "short_name": "Model" },
+        { "key": "b_struct", "short_name": "Stru" },
+        { "key": "b_decay", "short_name": "Decay" },
+        { "key": "b_damp", "short_name": "Damp" },
+        { "key": "b_pos", "short_name": "Position" },
+        { "key": "b_tone", "short_name": "Tone" },
+        { "key": "b_tune", "short_name": "Tune" },
+        { "key": "b_tension", "short_name": "Tens" }]
         },
         "Voice": {
           "name": "Voice",
           "knobs": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "drive", "level"],
-          "params": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "drive", "level"]
+          "params": ["couple", "balance", "glide", "amp_attack", "amp_release", "spread", "drive", "level",
+        { "key": "amp_attack", "short_name": "Atk" },
+        { "key": "amp_release", "short_name": "Rel" }]
         },
         "FX": {
           "name": "FX",
           "knobs": ["rev_mix", "rev_size", "rev_damp", "dly_mix", "dly_time", "dly_fb", "dly_tone", "width"],
-          "params": ["rev_mix", "rev_size", "rev_damp", "dly_mix", "dly_time", "dly_fb", "dly_tone", "width"]
+          "params": ["rev_mix", "rev_size", "rev_damp", "dly_mix", "dly_time", "dly_fb", "dly_tone", "width",
+        { "key": "rev_size", "short_name": "Size" },
+        { "key": "rev_damp", "short_name": "Damp" },
+        { "key": "dly_time", "short_name": "Time" },
+        { "key": "dly_fb", "short_name": "Fbk" },
+        { "key": "dly_tone", "short_name": "Tone" }]
         },
         "FX2": {
           "name": "FX 2",
           "knobs": ["eq_tone", "eq_body", "cho_mix", "cho_rate", "cho_depth", "comp_amt", "lim_drive", "lim_ceil"],
-          "params": ["eq_tone", "eq_body", "cho_mix", "cho_rate", "cho_depth", "comp_amt", "lim_drive", "lim_ceil"]
+          "params": ["eq_tone", "eq_body", "cho_mix", "cho_rate", "cho_depth", "comp_amt", "lim_drive", "lim_ceil",
+        { "key": "cho_rate", "short_name": "Rate" },
+        { "key": "cho_depth", "short_name": "Depth" },
+        { "key": "lim_drive", "short_name": "Drive" },
+        { "key": "lim_ceil", "short_name": "Ceil" }]
         },
         "Mod": {
           "name": "Mod",
           "knobs": ["lfo1_rate", "lfo1_depth", "lfo1_shape", "lfo1_target", "lfo2_rate", "lfo2_depth", "lfo2_shape", "lfo2_target"],
-          "params": ["lfo1_rate", "lfo1_depth", "lfo1_shape", "lfo1_target", "lfo2_rate", "lfo2_depth", "lfo2_shape", "lfo2_target"]
+          "params": ["lfo1_rate", "lfo1_depth", "lfo1_shape", "lfo1_target", "lfo2_rate", "lfo2_depth", "lfo2_shape", "lfo2_target",
+        { "key": "lfo1_rate", "short_name": "L1 RTE" },
+        { "key": "lfo1_depth", "short_name": "L1 DPT" },
+        { "key": "lfo1_shape", "short_name": "Shape 1" },
+        { "key": "lfo1_target", "short_name": "Target 1" },
+        { "key": "lfo2_rate", "short_name": "L2 RTE" },
+        { "key": "lfo2_depth", "short_name": "L2 DPT" },
+        { "key": "lfo2_shape", "short_name": "Shape 2" },
+        { "key": "lfo2_target", "short_name": "Target 2" }]
         },
         "Touch": {
           "name": "Aftertouch",
           "knobs": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"],
-          "params": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"]
+          "params": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve",
+        { "key": "at_preset", "short_name": "Preset" },
+        { "key": "at_bright", "short_name": "Bright" },
+        { "key": "at_bend", "short_name": "Bend" },
+        { "key": "at_vrate", "short_name": "Rate" },
+        { "key": "at_curve", "short_name": "Curve" }]
         },
         "Patch": {
           "name": "Patch",
           "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype"],
-          "params": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype", "voicing"]
+          "params": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype", "voicing",
+        { "key": "rnd_patch", "short_name": "Patch" },
+        { "key": "rnd_exc", "short_name": "Exciter" },
+        { "key": "rnd_reson", "short_name": "Reson" },
+        { "key": "rnd_all", "short_name": "All" },
+        { "key": "ftype", "short_name": "Filter" }]
         }
       }
     },
