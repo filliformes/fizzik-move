@@ -1,7 +1,7 @@
 {
   "id": "fizzik",
   "name": "Fizzik",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "api_version": 2,
   "component_type": "sound_generator",
   "description": "Polyphonic simplex physical-modeling synth: two coupled resonators (string/beam/plate/membrane) with tension-modulation.",
@@ -18,9 +18,9 @@
       "levels": {
         "root": {
           "name": "Fizzik",
-          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype"],
+          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "cutoff", "resonance", "ftype", "voicing"],
           "params": [
-            {"level": "Patch", "label": "Patch"},
+            "preset", "rnd_patch", "rnd_exc", "rnd_reson", "cutoff", "resonance", "ftype", "voicing",
             {"level": "Exciter", "label": "Exciter"},
             {"level": "ResonA", "label": "Reson A"},
             {"level": "ResonB", "label": "Reson B"},
@@ -70,15 +70,15 @@
           "name": "Aftertouch",
           "knobs": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"],
           "params": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"]
-        },
-        "Patch": {
-          "name": "Patch",
-          "knobs": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype"],
-          "params": ["preset", "rnd_patch", "rnd_exc", "rnd_reson", "rnd_all", "cutoff", "resonance", "ftype", "voicing"]
         }
       }
     },
     "chain_params": [
+      {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle", "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad", "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum", "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine", "Init"]},
+      {"key": "rnd_patch", "name": "Rnd Patch", "type": "enum", "options": ["idle", "trigger"], "access": "write"},
+      {"key": "rnd_exc", "name": "Rnd Exciter", "type": "enum", "options": ["idle", "trigger"], "access": "write"},
+      {"key": "rnd_reson", "name": "Rnd Reson", "type": "enum", "options": ["idle", "trigger"], "access": "write"},
+
       {"key": "exc_mix", "name": "Exc Mix", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "exc_crackle", "name": "Crackle", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "exc_color", "name": "Color", "type": "float", "min": 0, "max": 1, "step": 0.01},
@@ -138,13 +138,13 @@
       {"key": "lim_drive", "name": "Lim Drive", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "lim_ceil", "name": "Lim Ceil", "type": "float", "min": 0, "max": 1, "step": 0.01},
 
-      {"key": "lfo1_rate", "name": "LFO1 Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
-      {"key": "lfo1_depth", "name": "LFO1 Depth", "type": "float", "min": 0, "max": 1, "step": 0.01},
-      {"key": "lfo1_shape", "name": "LFO1 Shape", "type": "enum", "options": ["Sine", "Tri", "Saw", "Square", "S&H"]},
+      {"key": "lfo1_rate", "name": "LFO1 Rate", "type": "float", "min": 0, "max": 1, "step": 0.01, "viz": {"group": "lfo1", "role": "rate", "kind": "lfo"}},
+      {"key": "lfo1_depth", "name": "LFO1 Depth", "type": "float", "min": 0, "max": 1, "step": 0.01, "viz": {"group": "lfo1", "role": "depth"}},
+      {"key": "lfo1_shape", "name": "LFO1 Shape", "type": "enum", "options": ["Sine", "Tri", "Saw", "Square", "S&H"], "viz": {"group": "lfo1", "role": "shape"}},
       {"key": "lfo1_target", "name": "LFO1 Target", "type": "enum", "options": ["Off", "Cutoff", "Pitch", "Couple", "Balance", "Tension", "Tone", "Reso"]},
-      {"key": "lfo2_rate", "name": "LFO2 Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
-      {"key": "lfo2_depth", "name": "LFO2 Depth", "type": "float", "min": 0, "max": 1, "step": 0.01},
-      {"key": "lfo2_shape", "name": "LFO2 Shape", "type": "enum", "options": ["Sine", "Tri", "Saw", "Square", "S&H"]},
+      {"key": "lfo2_rate", "name": "LFO2 Rate", "type": "float", "min": 0, "max": 1, "step": 0.01, "viz": {"group": "lfo2", "role": "rate", "kind": "lfo"}},
+      {"key": "lfo2_depth", "name": "LFO2 Depth", "type": "float", "min": 0, "max": 1, "step": 0.01, "viz": {"group": "lfo2", "role": "depth"}},
+      {"key": "lfo2_shape", "name": "LFO2 Shape", "type": "enum", "options": ["Sine", "Tri", "Saw", "Square", "S&H"], "viz": {"group": "lfo2", "role": "shape"}},
       {"key": "lfo2_target", "name": "LFO2 Target", "type": "enum", "options": ["Off", "Cutoff", "Pitch", "Couple", "Balance", "Tension", "Tone", "Reso"]},
 
       {"key": "at_preset", "name": "AT Preset", "type": "enum", "options": ["Off", "Gentle", "Brighten", "Bow", "Swell", "Vibrato", "Expressive", "Cello", "Wild", "Sforzato"]},
@@ -154,13 +154,7 @@
       {"key": "at_vib", "name": "AT Vib", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "at_bend", "name": "AT Bend", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "at_vrate", "name": "AT Vib Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
-      {"key": "at_curve", "name": "AT Curve", "type": "float", "min": 0, "max": 1, "step": 0.01},
-
-      {"key": "preset", "name": "Preset", "type": "enum", "options": ["AlienChurch", "BowedGlass", "CaveStrings", "CouncilsPiano", "DistortedBass", "FeedbackHarp", "JudgementAwaits", "OldResonances", "PreparedPiano", "RythmicBow", "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle", "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad", "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum", "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine"]},
-      {"key": "rnd_patch", "name": "Rnd Patch", "type": "int", "min": 0, "max": 127, "step": 1},
-      {"key": "rnd_exc", "name": "Rnd Exciter", "type": "int", "min": 0, "max": 127, "step": 1},
-      {"key": "rnd_reson", "name": "Rnd Reson", "type": "int", "min": 0, "max": 127, "step": 1},
-      {"key": "rnd_all", "name": "Rnd All", "type": "int", "min": 0, "max": 127, "step": 1}
+      {"key": "at_curve", "name": "AT Curve", "type": "float", "min": 0, "max": 1, "step": 0.01}
     ]
   }
 }

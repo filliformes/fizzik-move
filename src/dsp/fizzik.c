@@ -46,7 +46,7 @@
 #define MODEL_PLATE    2
 #define MODEL_MEMBRANE 3
 
-#define N_PRESETS     30
+#define N_PRESETS     31
 
 #define N_AT_PRESET 10
 static const char *MODEL_NAMES[4]  = { "String", "Beam", "Plate", "Membrane" };
@@ -72,12 +72,12 @@ static const char *PRESET_NAMES[N_PRESETS] = {
     "SensitiveSkin", "Sharp", "ShockingPluck", "Slappy", "SurroundedByBells", "XyloStyle",
     "GlassKalimba", "IronLullaby", "TidalGong", "HollowReed", "StarlightPad",
     "BrokenMusicBox", "DeepDiveBass", "CopperTongue", "GhostSitar", "MarbleDrum",
-    "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine"
+    "WhisperHarp", "TitaniumBell", "FrozenLake", "PulseEngine", "Init"
 };
 
 /* Page-aware knob overlay: keys per page (index = current_page). */
 static const char *PAGE_KEYS[9][8] = {
-    { "preset","rnd_patch","rnd_exc","rnd_reson","rnd_all","cutoff","resonance","ftype" },
+    { "preset","rnd_patch","rnd_exc","rnd_reson","cutoff","resonance","ftype","voicing" },
     { "exc_mix","exc_crackle","exc_color","exc_attack","exc_decay","exc_reso","vel_level","vel_color" },
     { "a_model","a_struct","a_decay","a_damp","a_pos","a_tone","a_tune","a_tension" },
     { "b_model","b_struct","b_decay","b_damp","b_pos","b_tone","b_tune","b_tension" },
@@ -106,9 +106,15 @@ static inline float soft_limit(float x) { /* ceiling ~+12 dBFS (coupling guard) 
     const float c = 4.0f;
     return c * tanhf(x * (1.0f / c));
 }
-static inline float out_limit(float x) { /* gentle master limiter, ceiling ~0.9 */
+static inline float out_limit(float x) {
+    /* Soft SAFETY clip with real headroom — NOT the loudness ceiling. Linear
+     * through normal program (poly chords reach ~0.7-1.3 here), bounds only
+     * pathological peaks at ±2 before the lookahead brickwall, which is the
+     * actual ceiling (lim_ceil, 0.5..0.99). The old 0.9·tanh(x/0.9) sheared
+     * from ~0.4 up: audible distortion on poly + resonant filter that no
+     * limiter setting could remove (it sat BEFORE the limiter). */
     if (!isfinite(x)) return 0.0f;
-    return 0.9f * tanhf(x * 1.1111f);
+    return 2.0f * tanhf(x * 0.5f);
 }
 
 /* xorshift RNG -> [0,1) */
@@ -643,12 +649,14 @@ static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
     /* SVF-family voicings: Clean(0) SEM(1) MS-20(2) Steiner(3) Sallen-Key(10). */
     if (voicing==0 || voicing==1 || voicing==2 || voicing==3 || voicing==10) {
         float kmin, krange, drive = 1.0f, trim;
-        /* trim: level-match to the ladder family (which is quieter due to input drive). */
+        /* trim: measured level-match to Clean SVF on sustained 4-voice program
+         * (scripts/test_voicing_levels.c) — the input tanh drive of the driven
+         * voicings loses 2-4 dB there, masked before by the 0.9-tanh squash. */
         switch (voicing) {
             case 1:  kmin=0.20f; krange=1.65f; trim=0.68f; break;              /* SEM: soft res  */
-            case 2:  kmin=0.030f; krange=1.97f; drive=1.8f; trim=0.82f; break; /* MS-20: scream  */
-            case 3:  kmin=0.10f; krange=1.85f; drive=1.2f; trim=0.75f; break;  /* Steiner        */
-            case 10: kmin=0.050f; krange=1.90f; drive=1.5f; trim=0.78f; break; /* Sallen-Key K35 */
+            case 2:  kmin=0.030f; krange=1.97f; drive=1.8f; trim=0.96f; break; /* MS-20: scream  */
+            case 3:  kmin=0.10f; krange=1.85f; drive=1.2f; trim=0.82f; break;  /* Steiner        */
+            case 10: kmin=0.050f; krange=1.90f; drive=1.5f; trim=0.89f; break; /* Sallen-Key K35 */
             default: kmin=0.060f; krange=1.94f; trim=0.68f; break;             /* Clean          */
         }
         float k = kmin + krange * (1.0f - reso);      /* reso up -> k down -> more Q */
@@ -668,20 +676,29 @@ static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
             band = ftanh(band * 1.4f);
             hp   = ftanh(hp * 1.2f);
         }
-        switch (type) { case 0: return lp*trim; case 1: return hp*trim; case 2: return band*trim; default: return notch*trim; }
+        /* Resonant-peak compensation: the SVF peak grows as Q=1/k (up to +24 dB
+         * at kmin) with no passband loss to hide it — driving reso+cutoff on a
+         * poly signal slammed the output stage. Trim LP/HP once Q exceeds 1
+         * (moderate settings untouched); band is unity-peak and the notch has
+         * no peak, so both stay as they were. */
+        float rtrim = (k < 1.0f) ? 1.0f / (1.0f + 0.15f * (1.0f / k - 1.0f)) : 1.0f;
+        switch (type) { case 0: return lp*trim*rtrim; case 1: return hp*trim*rtrim; case 2: return band*trim; default: return notch*trim; }
     }
 
-    /* Ladder-family voicings (ZDF, tanh feedback -> bounded self-oscillation). */
+    /* Ladder-family voicings (ZDF, tanh feedback -> bounded self-oscillation).
+     * trim: measured level-match to Clean SVF on 4-voice program (see
+     * scripts/test_voicing_levels.c) — the input tanh drive compresses loud
+     * poly signals, which the old 0.9-tanh output squash used to mask. */
     float G = g / (1.0f + g);
-    int poles; float kmax, drive;
+    int poles; float kmax, drive, trim;
     switch (voicing) {
-        case 5:  poles=2; kmax=3.6f; drive=1.2f;  break;   /* Ladder 2-pole */
-        case 6:  poles=1; kmax=2.6f; drive=1.1f;  break;   /* Ladder 1-pole */
-        case 7:  poles=4; kmax=3.8f; drive=1.05f; break;   /* Prophet (SSM) */
-        case 8:  poles=4; kmax=4.0f; drive=1.15f; break;   /* Oberheim      */
-        case 9:  poles=4; kmax=4.3f; drive=1.7f;  break;   /* Diode / 303   */
-        case 11: poles=4; kmax=4.0f; drive=2.4f;  break;   /* Vintage       */
-        default: poles=4; kmax=4.0f; drive=1.3f;  break;   /* Ladder 4-pole */
+        case 5:  poles=2; kmax=3.6f; drive=1.2f;  trim=0.82f; break;  /* Ladder 2-pole */
+        case 6:  poles=1; kmax=2.6f; drive=1.1f;  trim=0.80f; break;  /* Ladder 1-pole */
+        case 7:  poles=4; kmax=3.8f; drive=1.05f; trim=0.79f; break;  /* Prophet (SSM) */
+        case 8:  poles=4; kmax=4.0f; drive=1.15f; trim=0.81f; break;  /* Oberheim      */
+        case 9:  poles=4; kmax=4.3f; drive=1.7f;  trim=0.94f; break;  /* Diode / 303   */
+        case 11: poles=4; kmax=4.0f; drive=2.4f;  trim=1.13f; break;  /* Vintage       */
+        default: poles=4; kmax=4.0f; drive=1.3f;  trim=0.84f; break;  /* Ladder 4-pole */
     }
     float k = kmax * reso;
     float xin = (drive > 1.01f) ? ftanh(x * drive) * (1.0f / drive) : x;
@@ -702,10 +719,10 @@ static inline float filter_process(filter_ch_t *f, float x, float g, float reso,
     float bp = (poles<=2) ? (2.0f*(y1 - y2)) : (4.0f*(y2 - 2.0f*y3 + y4));
     float comp = 1.0f + 0.5f * k;                  /* restore level lost to resonance */
     switch (type) {
-        case 0: return lp * comp;
-        case 1: return hp;
-        case 2: return bp;
-        default: return u - bp;                    /* notch */
+        case 0: return lp * comp * trim;
+        case 1: return hp * trim;
+        case 2: return bp * trim;
+        default: return (u - bp) * trim;           /* notch */
     }
 }
 
@@ -776,6 +793,8 @@ typedef struct {
     float    rnd_gain; int rnd_phase, pending_rnd, rnd_hold, pending_preset;
     /* Reverb send DC guard (one-pole HPF state). */
     float    rev_send_lp;
+    /* Polyphony compensation gain (n_eff^-0.35, smoothed; see render_block). */
+    float    poly_gain;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
 } fizzik_t;
@@ -816,6 +835,8 @@ static const params_t PRESETS[N_PRESETS] = {
   /* TitaniumBell */   {0.4f,0.03f,0.82f,0.008f,0.2f,0.25f,0.55f,0.5f, MODEL_PLATE,0.75f,0.9f,0.5f,0.55f,0.8f,12,0.0f, MODEL_PLATE,0.6f,0.88f,0.48f,0.5f,0.75f,24,0.0f, 0.3f,0.5f,0.1f,0.01f,0.7f,0.6f,0.65f,0.5f, 4.257f},
   /* FrozenLake */     {0.1f,0.05f,0.6f,0.3f,0.5f,0.3f,0.3f,0.4f, MODEL_MEMBRANE,0.6f,0.85f,0.5f,0.5f,0.55f,12,0.0f, MODEL_PLATE,0.5f,0.85f,0.48f,0.55f,0.62f,7,0.0f, 0.3f,0.5f,0.25f,0.4f,0.7f,0.7f,0.8f,0.5f, 0.267f},
   /* PulseEngine */    {0.35f,0.15f,0.6f,0.008f,0.18f,0.45f,0.65f,0.5f, MODEL_STRING,0.2f,0.75f,0.35f,0.5f,0.6f,0,0.4f, MODEL_BEAM,0.5f,0.7f,0.45f,0.5f,0.6f,-12,0.0f, 0.55f,0.5f,0.0f,0.01f,0.4f,0.5f,0.3f,0.55f, 0.894f},
+  /* Init (blank neutral patch — twin plain strings, no coupling, no FX) */
+  /* Init */           {0.5f,0.0f,0.5f,0.01f,0.25f,0.3f,0.5f,0.3f, MODEL_STRING,0.2f,0.8f,0.5f,0.3f,0.6f,0,0.0f, MODEL_STRING,0.2f,0.8f,0.5f,0.3f,0.6f,0,0.0f, 0.0f,0.5f,0.0f,0.01f,0.4f,0.0f,0.0f,0.6f, 6.36f},
 };
 
 /* ── Parameter descriptor table (float/int fields of params_t) ───────────────── */
@@ -934,6 +955,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
      * even at high resonance / screechy patches. User can raise it if they want. */
     inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.35f;
     inst->lim_gain = 1.0f;
+    inst->poly_gain = 1.0f;
     inst->rnd_gain = 1.0f;   /* rnd_phase / pending_rnd = 0 (idle) from calloc */
     inst->pending_preset = -1;   /* calloc 0 would mean "preset 0 pending" */
     inst->lfo1.rng = 0x9E3779B9u; inst->lfo2.rng = 0x85EBCA6Bu;
@@ -1079,55 +1101,6 @@ static void rnd_patch(fizzik_t *inst) {
  * aftertouch + master EQ/chorus/comp. The output LIMITER is deliberately left at
  * its safe setting (never randomized) for hearing safety; resonance/drive are
  * skewed low to avoid screech. */
-static void rnd_all(fizzik_t *inst) {
-    uint32_t *s = &inst->rng;
-    rnd_patch(inst);                                     /* voice (+ makeup) */
-    inst->p.rev_mix  = randf(s) * randf(s);
-    inst->p.rev_size = 0.3f + 0.5f * randf(s);
-    inst->p.rev_damp = 0.45f + 0.4f * randf(s);          /* darker tails: bright wash = screech */
-    inst->p.dly_mix  = randf(s) * randf(s) * 0.7f;
-    inst->p.dly_time = randf(s);
-    inst->p.dly_fb   = randf(s) * 0.6f;
-    inst->p.dly_tone = 0.15f + 0.5f * randf(s);          /* 0.15..0.65: echoes never bright */
-    inst->p.drive    = randf(s) * randf(s) * 0.25f;      /* tanh creates HF harmonics — keep tiny */
-    inst->p.width    = 0.3f + 0.5f * randf(s);
-    /* Filter type weighted LP-heavy. NO HP (outlier dumps show even low-cutoff HP
-     * strips the body and reads screechy); Notch kept rare. */
-    { float fr = randf(s);
-      inst->p.flt_type = (fr < 0.70f) ? 0 : (fr < 0.90f) ? 2 : 3; }  /* 70% LP, 20% BP, 10% Notch */
-    /* Cutoff range is TYPE-aware: LP can sit high (it removes HF anyway), but
-     * BP/Notch/HP at a high cutoff park the output in the 3-7 kHz screech band
-     * (or strip the lows so only highs remain) — keep them low, with less reso. */
-    if (inst->p.flt_type == 0) {
-        inst->p.flt_cutoff = 0.35f + 0.4f * randf(s);    /* LP: 0.35..0.75 */
-        inst->p.flt_reso   = randf(s) * randf(s) * 0.4f;
-    } else {
-        inst->p.flt_cutoff = 0.22f + 0.3f * randf(s);    /* BP/Notch/HP: 0.22..0.52 */
-        inst->p.flt_reso   = randf(s) * randf(s) * 0.25f;
-    }
-    inst->p.flt_voicing = rnd_i(s, N_VOICING);
-    /* LFO targets weighted AWAY from Tone/Reso (those push brightness/resonance
-     * unpredictably — screech fuel): mostly Off/Cutoff/Couple/Balance. */
-    {
-        static const int TGT_POOL[10] = { 0, 0, 1, 1, 2, 3, 3, 4, 4, 5 };  /* Tone/Reso excluded */
-        inst->p.lfo1_target = TGT_POOL[rnd_i(s, 10)];
-        inst->p.lfo2_target = TGT_POOL[rnd_i(s, 10)];
-    }
-    inst->p.lfo1_rate = randf(s) * 0.5f; inst->p.lfo1_depth = randf(s) * randf(s) * 0.5f;
-    inst->p.lfo1_shape = rnd_i(s, N_LFO_SHAPE);
-    inst->p.lfo2_rate = randf(s) * 0.4f; inst->p.lfo2_depth = randf(s) * randf(s) * 0.4f;
-    inst->p.lfo2_shape = rnd_i(s, N_LFO_SHAPE);
-    apply_at_preset(inst, rnd_i(s, N_AT_PRESET));
-    /* EQ tilt biased neutral-to-dark (bright tilt = screech amplifier). */
-    inst->p.eq_tone = 0.28f + 0.26f * randf(s); inst->p.eq_body = 0.4f + 0.3f * randf(s);
-    /* Chorus: fast + deep = FM sidebands = metallic HF (confirmed in outlier
-     * dumps). Keep rate modest and make depth shrink as rate rises. */
-    inst->p.cho_mix   = randf(s) * randf(s);
-    inst->p.cho_rate  = randf(s) * 0.5f;
-    inst->p.cho_depth = randf(s) * (0.6f - inst->p.cho_rate * 0.6f);   /* fast -> shallow */
-    inst->p.comp_amt = randf(s) * 0.5f;
-}
-
 /* Request a randomize: fade out first (render applies it while silent, then fades
  * back in) so the abrupt parameter/model change is never audible as a click.
  * which: 1=patch, 2=exciter, 3=reson, 4=all. */
@@ -1166,7 +1139,6 @@ static void apply_pending_rnd(fizzik_t *inst) {
     if      (which == 1) rnd_patch(inst);
     else if (which == 2) rnd_exciter(inst);
     else if (which == 3) rnd_reson(inst);
-    else if (which == 4) rnd_all(inst);
     if (had_preset || (which != 0 && which != 2))
         reset_voice_coupling(inst);   /* exciter doesn't touch resonators */
     inst->pending_rnd = 0;
@@ -1225,8 +1197,7 @@ static void set_param(void *instance, const char *key, const char *val) {
         if (strncmp(pk, "rnd_", 4) == 0) {
             if (delta != 0) { if (!strcmp(pk,"rnd_patch")) trigger_rnd(inst,1);
                               else if (!strcmp(pk,"rnd_exc")) trigger_rnd(inst,2);
-                              else if (!strcmp(pk,"rnd_reson")) trigger_rnd(inst,3);
-                              else if (!strcmp(pk,"rnd_all")) trigger_rnd(inst,4); }
+                              else if (!strcmp(pk,"rnd_reson")) trigger_rnd(inst,3); }
             return;
         }
         const pdesc_t *d = find_pdesc(pk);
@@ -1248,13 +1219,29 @@ static void set_param(void *instance, const char *key, const char *val) {
             if (!strcmp(key,"rnd_patch")) trigger_rnd(inst,1);
             else if (!strcmp(key,"rnd_exc")) trigger_rnd(inst,2);
             else if (!strcmp(key,"rnd_reson")) trigger_rnd(inst,3);
-            else if (!strcmp(key,"rnd_all")) trigger_rnd(inst,4);
         }
         return;
     }
     if (strcmp(key, "preset") == 0) {
-        for (int i = 0; i < N_PRESETS; i++) if (strcmp(val, PRESET_NAMES[i]) == 0) { trigger_preset(inst, i); return; }
-        trigger_preset(inst, atoi(val)); return;
+        /* By-key preset select (menu edit / host state restore). Apply
+         * IMMEDIATELY — the knob path's deferred apply would fire at the next
+         * render block, AFTER the host has restored the individual params, and
+         * stomp a saved patch back to the factory preset. Re-selecting the
+         * already-current preset is a no-op for the same reason: on restore the
+         * host echoes the saved preset name back after "state" has set it. */
+        int idx = -1;
+        for (int i = 0; i < N_PRESETS; i++) if (strcmp(val, PRESET_NAMES[i]) == 0) { idx = i; break; }
+        if (idx < 0) {
+            char *end; long li = strtol(val, &end, 10);
+            if (end == val) return;   /* neither a preset name nor an index: ignore */
+            idx = (int)li;
+        }
+        idx = (idx < 0) ? 0 : (idx >= N_PRESETS ? N_PRESETS - 1 : idx);
+        if (idx == inst->preset_idx) return;
+        apply_preset(inst, idx);
+        reset_voice_coupling(inst);
+        if (inst->rnd_phase == 0 || inst->rnd_phase == 2) inst->rnd_phase = 1;  /* duck masks the jump */
+        return;
     }
     if (strcmp(key, "a_model") == 0) { inst->p.a_model = parse_model(val); return; }
     if (strcmp(key, "b_model") == 0) { inst->p.b_model = parse_model(val); return; }
@@ -1308,6 +1295,13 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "chain_params") == 0) {
         return snprintf(buf, buf_len,
           "["
+          /* preset FIRST (an ordered per-key restore must apply it before the
+           * individual params); rnd_* are access:"write" triggers — the host
+           * renders a fire-on button, never scrubs the value. */
+          "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\",\"Init\"]},"
+          "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"enum\",\"options\":[\"idle\",\"trigger\"],\"access\":\"write\"},"
+          "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"enum\",\"options\":[\"idle\",\"trigger\"],\"access\":\"write\"},"
+          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"enum\",\"options\":[\"idle\",\"trigger\"],\"access\":\"write\"},"
           "{\"key\":\"exc_mix\",\"name\":\"Exc Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"exc_crackle\",\"name\":\"Crackle\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"exc_color\",\"name\":\"Color\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
@@ -1360,13 +1354,15 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"comp_amt\",\"name\":\"Glue\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"lim_drive\",\"name\":\"Lim Drive\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"lim_ceil\",\"name\":\"Lim Ceil\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"lfo1_rate\",\"name\":\"LFO1 Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"lfo1_depth\",\"name\":\"LFO1 Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"lfo1_shape\",\"name\":\"LFO1 Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Tri\",\"Saw\",\"Square\",\"S&H\"]},"
+          /* Declared viz groups: both LFOs draw the animated LFO graphic
+           * (the detector alone only ever resolves ONE group per page). */
+          "{\"key\":\"lfo1_rate\",\"name\":\"LFO1 Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"viz\":{\"group\":\"lfo1\",\"role\":\"rate\",\"kind\":\"lfo\"}},"
+          "{\"key\":\"lfo1_depth\",\"name\":\"LFO1 Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"viz\":{\"group\":\"lfo1\",\"role\":\"depth\"}},"
+          "{\"key\":\"lfo1_shape\",\"name\":\"LFO1 Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Tri\",\"Saw\",\"Square\",\"S&H\"],\"viz\":{\"group\":\"lfo1\",\"role\":\"shape\"}},"
           "{\"key\":\"lfo1_target\",\"name\":\"LFO1 Target\",\"type\":\"enum\",\"options\":[\"Off\",\"Cutoff\",\"Pitch\",\"Couple\",\"Balance\",\"Tension\",\"Tone\",\"Reso\"]},"
-          "{\"key\":\"lfo2_rate\",\"name\":\"LFO2 Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"lfo2_depth\",\"name\":\"LFO2 Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"lfo2_shape\",\"name\":\"LFO2 Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Tri\",\"Saw\",\"Square\",\"S&H\"]},"
+          "{\"key\":\"lfo2_rate\",\"name\":\"LFO2 Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"viz\":{\"group\":\"lfo2\",\"role\":\"rate\",\"kind\":\"lfo\"}},"
+          "{\"key\":\"lfo2_depth\",\"name\":\"LFO2 Depth\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01,\"viz\":{\"group\":\"lfo2\",\"role\":\"depth\"}},"
+          "{\"key\":\"lfo2_shape\",\"name\":\"LFO2 Shape\",\"type\":\"enum\",\"options\":[\"Sine\",\"Tri\",\"Saw\",\"Square\",\"S&H\"],\"viz\":{\"group\":\"lfo2\",\"role\":\"shape\"}},"
           "{\"key\":\"lfo2_target\",\"name\":\"LFO2 Target\",\"type\":\"enum\",\"options\":[\"Off\",\"Cutoff\",\"Pitch\",\"Couple\",\"Balance\",\"Tension\",\"Tone\",\"Reso\"]},"
           "{\"key\":\"at_preset\",\"name\":\"AT Preset\",\"type\":\"enum\",\"options\":[\"Off\",\"Gentle\",\"Brighten\",\"Bow\",\"Swell\",\"Vibrato\",\"Expressive\",\"Cello\",\"Wild\",\"Sforzato\"]},"
           "{\"key\":\"at_bright\",\"name\":\"AT Bright\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
@@ -1375,20 +1371,15 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"at_vib\",\"name\":\"AT Vib\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"at_bend\",\"name\":\"AT Bend\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"at_vrate\",\"name\":\"AT Vib Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"at_curve\",\"name\":\"AT Curve\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"enum\",\"options\":[\"AlienChurch\",\"BowedGlass\",\"CaveStrings\",\"CouncilsPiano\",\"DistortedBass\",\"FeedbackHarp\",\"JudgementAwaits\",\"OldResonances\",\"PreparedPiano\",\"RythmicBow\",\"SensitiveSkin\",\"Sharp\",\"ShockingPluck\",\"Slappy\",\"SurroundedByBells\",\"XyloStyle\",\"GlassKalimba\",\"IronLullaby\",\"TidalGong\",\"HollowReed\",\"StarlightPad\",\"BrokenMusicBox\",\"DeepDiveBass\",\"CopperTongue\",\"GhostSitar\",\"MarbleDrum\",\"WhisperHarp\",\"TitaniumBell\",\"FrozenLake\",\"PulseEngine\"]},"
-          "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
-          "{\"key\":\"rnd_exc\",\"name\":\"Rnd Exciter\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
-          "{\"key\":\"rnd_reson\",\"name\":\"Rnd Reson\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
-          "{\"key\":\"rnd_all\",\"name\":\"Rnd All\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1}"
+          "{\"key\":\"at_curve\",\"name\":\"AT Curve\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01}"
           "]");
     }
 
     if (strcmp(key, "ui_hierarchy") == 0) {
         return snprintf(buf, buf_len,
           "{\"modes\":null,\"levels\":{"
-          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"rnd_all\",\"cutoff\",\"resonance\",\"ftype\"],"
-          "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"FX2\",\"label\":\"FX 2\"},{\"level\":\"Mod\",\"label\":\"Mod\"},{\"level\":\"Touch\",\"label\":\"Aftertouch\"}]},"
+          "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],"
+          "\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\",{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"FX2\",\"label\":\"FX 2\"},{\"level\":\"Mod\",\"label\":\"Mod\"},{\"level\":\"Touch\",\"label\":\"Aftertouch\"}]},"
           "\"Exciter\":{\"name\":\"Exciter\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],\"params\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"]},"
           "\"ResonA\":{\"name\":\"Reson A\",\"knobs\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"],\"params\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"]},"
           "\"ResonB\":{\"name\":\"Reson B\",\"knobs\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"],\"params\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"]},"
@@ -1396,8 +1387,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "\"FX\":{\"name\":\"FX\",\"knobs\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"],\"params\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"]},"
           "\"FX2\":{\"name\":\"FX 2\",\"knobs\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"],\"params\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"]},"
           "\"Mod\":{\"name\":\"Mod\",\"knobs\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"],\"params\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"]},"
-          "\"Touch\":{\"name\":\"Aftertouch\",\"knobs\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"],\"params\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"]},"
-          "\"Patch\":{\"name\":\"Patch\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"rnd_all\",\"cutoff\",\"resonance\",\"ftype\"],\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"rnd_all\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"]}"
+          "\"Touch\":{\"name\":\"Aftertouch\",\"knobs\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"],\"params\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"]}"
           "}}");
     }
 
@@ -1410,7 +1400,6 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(pk, "rnd_patch") == 0) return snprintf(buf, buf_len, "Rnd Patch");
         if (strcmp(pk, "rnd_exc") == 0) return snprintf(buf, buf_len, "Rnd Exc");
         if (strcmp(pk, "rnd_reson") == 0) return snprintf(buf, buf_len, "Rnd Reson");
-        if (strcmp(pk, "rnd_all") == 0) return snprintf(buf, buf_len, "Rnd All");
         const pdesc_t *d = find_pdesc(pk);
         return snprintf(buf, buf_len, "%s", d ? d->name : pk);
     }
@@ -1440,6 +1429,13 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     /* State serialize. */
     if (strcmp(key, "state") == 0) {
         int n = 0;
+        if (buf_len < 128) return -1;   /* never truncate state */
+        /* Preset FIRST (restore applies it before the individual params, which
+         * then overwrite it — user tweaks survive), then the baked makeup gain
+         * (not in PDESC; without it a restored patch keeps the default preset's
+         * level compensation — up to ~26 dB off). */
+        n += snprintf(buf + n, buf_len - n, "preset=%s\n", PRESET_NAMES[inst->preset_idx]);
+        n += snprintf(buf + n, buf_len - n, "__makeup=%.5f\n", (double)inst->p.makeup);
         for (int i = 0; i < N_PDESC; i++) {
             if (n > buf_len - 48) break;   /* guard: never pass snprintf a negative size */
             const pdesc_t *d = &PDESC[i];
@@ -1566,7 +1562,22 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     float comp_thr = 1.0f - comp_amt * 0.7f, comp_mkup = 1.0f + comp_amt * 1.2f;
     float lim_drv  = 1.0f + clampf(s->lim_drive, 0.0f, 1.0f) * 3.0f;
     float lim_ceil = 0.5f + clampf(s->lim_ceil, 0.0f, 1.0f) * 0.49f;
-    float lim_att = expf(-1.0f / (0.001f * SR)), lim_rel = expf(-1.0f / (0.06f * SR));
+    /* Release 150 ms: at the old 60 ms the gain recovered WITHIN a bass
+     * period during sustained limiting — heard as distortion on chords. */
+    float lim_att = expf(-1.0f / (0.001f * SR)), lim_rel = expf(-1.0f / (0.15f * SR));
+
+    /* Polyphony compensation: single notes are calibrated to peak ~0.21, so a
+     * raw 4-6 voice sum reaches 0.7-2.0 — parked the whole back end (soft clip
+     * + brickwall) in constant heavy gain reduction, i.e. chords distorted in
+     * every voicing. Scale the voice bus by n_eff^-0.35 (n_eff = summed amp
+     * envelopes, so releasing tails count fractionally): 1 voice = unity, a
+     * 4-voice chord sits ~4 dB down — under the ceiling, limiter back to a
+     * guard. Smoothed ~45 ms below so note on/off never steps the gain. */
+    float env_sum = 0.0f;
+    for (int vi = 0; vi < MAX_VOICES; vi++)
+        if (inst->v[vi].active) env_sum += inst->v[vi].amp_env;
+    float n_eff = (env_sum < 1.0f) ? 1.0f : (env_sum > (float)MAX_VOICES ? (float)MAX_VOICES : env_sum);
+    float pg_target = powf(n_eff, -0.35f);
 
     int rebuild_budget = 2;   /* max expensive modal rebuilds this block (see reso_set) */
 
@@ -1642,6 +1653,12 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             mixL += vout * v->pan_l;
             mixR += vout * v->pan_r;
         }
+
+        /* Polyphony compensation (pre-filter, so the voicings' input drive
+         * saturation sees the same level poly as mono). */
+        inst->poly_gain += 0.0005f * (pg_target - inst->poly_gain);
+        mixL *= inst->poly_gain;
+        mixR *= inst->poly_gain;
 
         /* Global multimode filter (post-synth, pre-FX). */
         mixL = filter_process(&inst->fltL, mixL, flt_g, flt_res, flt_type, flt_voi);

@@ -19,10 +19,10 @@ all DSP reimplemented independently in C for the Move.
 1. Install via the Schwung Module Store (or `MOVE_HOST=move.local ./scripts/install.sh`),
    power-cycle the Move, and add **Fizzik** as a sound generator.
 2. You land on the **Patch** page: browse **Preset** (knob 1), or roll the dice —
-   **Rnd Patch** (k2) for a new instrument, **Rnd All** (k5) to also randomize FX and mods.
+   **Rnd Patch** (k2) for a new instrument.
 3. Play the pads. **Press into a held pad** — polyphonic aftertouch makes notes bloom,
    swell, and sing (pick a feel with **AT Preset** on the Aftertouch page).
-4. Sculpt live with the global **filter** (Patch knobs 6–8) — 12 analog voicings.
+4. Sculpt live with the global **filter** (Patch knobs 5–8) — 12 analog voicings.
 
 ---
 
@@ -70,19 +70,18 @@ Jog wheel navigates pages; knobs 1–8 edit the current page.
 
 | # | Param | What it does |
 |---|---|---|
-| 1 | **Preset** | 30 factory presets (click-free switching, even mid-note) |
-| 2 | **Rnd Patch** | New random instrument: exciter + both resonators + couple/balance |
-| 3 | **Rnd Exciter** | Randomize only the strike — audible on the *next* note |
-| 4 | **Rnd Reson** | Randomize only the two resonators (keeps your exciter) |
-| 5 | **Rnd All** | Randomize *everything*: patch + FX + filter + LFOs + aftertouch |
-| 6 | **Cutoff** | Global filter cutoff (30 Hz – 18 kHz) |
-| 7 | **Resonance** | Global filter resonance (ladder voicings self-oscillate at max) |
-| 8 | **Filter Type** | LP / HP / BP / Notch |
-| menu | **Voicing** | 12 filter voicings (jog-click to open the menu) |
+| 1 | **Preset** | 31 factory presets (click-free switching, even mid-note; last = Init blank patch) |
+| 2 | **Rnd Patch** | Fire-button: new random instrument — exciter + both resonators + couple/balance |
+| 3 | **Rnd Exciter** | Fire-button: randomize only the strike — audible on the *next* note |
+| 4 | **Rnd Reson** | Fire-button: randomize only the two resonators (keeps your exciter) |
+| 5 | **Cutoff** | Global filter cutoff (30 Hz – 18 kHz) |
+| 6 | **Resonance** | Global filter resonance (ladder voicings self-oscillate at max) |
+| 7 | **Filter Type** | LP / HP / BP / Notch |
+| 8 | **Voicing** | 12 filter voicings |
 
-Randomizers are tuned to stay musical: darker-leaning, never above the played pitch,
-level-consistent, and applied through a fast fade so they never click. **Rnd All never
-touches the output limiter** — your hearing-safety ceiling always survives the dice.
+The three randomizers are momentary **buttons** — click to fire. They're tuned to stay
+musical: darker-leaning, never above the played pitch, level-consistent, and applied
+through a fast fade so they never click.
 
 ### 2 · Exciter — the strike
 
@@ -188,13 +187,17 @@ Channel aftertouch (from external MIDI) is also supported.
 
 ---
 
-## Presets (30)
+## Presets (31)
 
 AlienChurch · BowedGlass · CaveStrings · CouncilsPiano · DistortedBass · FeedbackHarp ·
 JudgementAwaits · OldResonances · PreparedPiano · RythmicBow · SensitiveSkin · Sharp ·
 ShockingPluck · Slappy · SurroundedByBells · XyloStyle · GlassKalimba · IronLullaby ·
 TidalGong · HollowReed · StarlightPad · BrokenMusicBox · DeepDiveBass · CopperTongue ·
-GhostSitar · MarbleDrum · WhisperHarp · TitaniumBell · FrozenLake · PulseEngine
+GhostSitar · MarbleDrum · WhisperHarp · TitaniumBell · FrozenLake · PulseEngine · Init
+
+**Init** (last in the list) is a blank neutral patch — twin plain strings, no coupling,
+no FX — made to be a clean starting point for your own sounds: dial it in, then save it
+as a user preset.
 
 All presets are level-calibrated (peak *and* perceived loudness) so browsing never jumps
 out at you. Presets carry only the *instrument* — the global performance layer (filter,
@@ -217,7 +220,7 @@ is the main tool for taming a patch that's too bright.
   Couple ~30% — struck metal over a resonant skin.
 - **Bowing without a bow:** AT Preset = *Bow* or *Cello*, hold a pluck and press.
 - **Dub station:** Delay mix + feedback up, then ride Dly Time — tape-style warble.
-- **One-knob mayhem, safely:** park on Patch, hit **Rnd All** between phrases. The
+- **One-button mayhem, safely:** park on Patch, hit **Rnd Patch** between phrases. The
   limiter ceiling guarantees it never gets dangerous.
 
 ## Building from source

@@ -19,13 +19,13 @@ typedef struct {
 
 extern plugin_api_v2_t* move_plugin_init_v2(const void *);
 
-static const char *NAMES[30] = {
+static const char *NAMES[31] = {
     "AlienChurch","BowedGlass","CaveStrings","CouncilsPiano","DistortedBass",
     "FeedbackHarp","JudgementAwaits","OldResonances","PreparedPiano","RythmicBow",
     "SensitiveSkin","Sharp","ShockingPluck","Slappy","SurroundedByBells","XyloStyle",
     "GlassKalimba","IronLullaby","TidalGong","HollowReed","StarlightPad",
     "BrokenMusicBox","DeepDiveBass","CopperTongue","GhostSitar","MarbleDrum",
-    "WhisperHarp","TitaniumBell","FrozenLake","PulseEngine"
+    "WhisperHarp","TitaniumBell","FrozenLake","PulseEngine","Init"
 };
 
 static void meter(plugin_api_v2_t *a, void *i, double *pk, double *rms) {
@@ -37,7 +37,7 @@ int main(void) {
     plugin_api_v2_t *a = move_plugin_init_v2(0);
     printf("%-16s %6s %6s | %6s(4v) | %7s(tail) | %s\n",
            "preset","peak","rms","peak","rms","makeup");
-    for (int pi = 0; pi < 30; pi++) {
+    for (int pi = 0; pi < 31; pi++) {
         int16_t buf[256];
         char m[64];
         double pk, rms, chordpk, chordrms, tailpk, tailrms;

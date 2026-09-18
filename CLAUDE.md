@@ -23,13 +23,13 @@ Modal core = bank of ≤24 RBJ band-pass biquads, recomputed only when pitch/str
 
 ## Files
 - `src/dsp/fizzik.c` — all DSP (single translation unit)
-- `src/module.json` — metadata + ui_hierarchy (5 pages) + chain_params (36 params)
+- `src/module.json` — metadata + ui_hierarchy (root + 8 sub-pages) + chain_params (~72 params, preset first; mirrored in the DSP-served copies)
 - `scripts/build.sh` — Docker ARM64 cross-compile (docker create + cp pattern, exit-code checked)
 - `scripts/install.sh` — scp to `modules/sound_generators/fizzik/`, chmod +x, chown
 - `.github/workflows/release.yml` — CI: version check → build → release → release.json
 
-## Pages (Patch is FIRST / root; 8 knobs each)
-1. **Patch** (root knobs): preset (30 named), rnd_patch, rnd_exc, rnd_reson, **cutoff, resonance, ftype, voicing** (global filter)
+## Pages (root is the Patch page; 8 knobs each — no separate "Patch" sub-level)
+1. **root** knobs: preset (31 named, last = "Init" blank neutral patch), rnd_patch, rnd_exc, rnd_reson (fire-buttons), **cutoff, resonance, ftype, voicing** (global filter). Root `params` = these 8 keys + the sub-level links. rnd_all was removed (user feedback).
 2. **Exciter**: exc_mix, exc_crackle, exc_color, exc_attack, exc_decay, exc_reso, vel_level, vel_color
 3. **Reson A**: a_model, a_struct, a_decay, a_damp, a_pos, a_tone, a_tune, a_tension
 4. **Reson B**: b_* (same eight)
@@ -61,8 +61,16 @@ MechanOdd's Limiter design (odoare/FxmeFX, LGPL — studied, not copied). Master
 filter → drive → EQ → chorus → delay → reverb → width → glue → tanh → lookahead limiter.
 
 ## Level calibration & FX
-- Per-voice output halved (`level_gain = level²·0.7·makeup`) + gentle master limiter
-  `out_limit` (0.9·tanh) so polyphony never hard-clips.
+- Per-voice output halved (`level_gain = level²·0.7·makeup`); `out_limit` is a SAFETY
+  soft-clip with real headroom (2·tanh(x/2) — linear through normal poly program), and
+  the **lookahead brickwall limiter is the actual ceiling** (the old 0.9·tanh sheared
+  from ~0.4 → poly+resonance distortion no limiter setting could remove).
+- **Polyphony compensation:** the voice bus is scaled by `poly_gain = n_eff^-0.35`
+  (n_eff = Σ amp envelopes, smoothed ~45 ms), applied PRE-filter — single notes stay at
+  the calibrated level, a 4-voice chord sits ~4 dB down, so chords no longer park the
+  limiter in constant gain reduction (that + the 60→150 ms limiter release fixed "all
+  voicings distort on a chord"). Chord cleanliness asserted by the clip-incidence check
+  in `scripts/test_filter_stress.c` (0% pinned samples at the default ceiling).
 - Each preset carries a **baked `makeup`** gain so every one peaks ~0.4 for a single
   note (target set in `scripts/test_levels.c`). Modal resonators self-level via a
   reference-burst RMS measurement in `modal_recompute`.
@@ -84,7 +92,15 @@ Multimode VA filter on the Patch/root page (knobs 5–8: Cutoff, Resonance, Filt
 LP/HP/BP/Notch, Voicing). Clean-room from public VA-filter math (Cytomic trapezoidal SVF +
 Zavalishin ZDF transistor ladder). **12 voicings**: Clean SVF, SEM, MS-20, Steiner,
 Ladder 4P/2P/1P, Prophet, Oberheim, Diode, Sallen-Key, Vintage. Self-oscillating resonance
-bounded by tanh feedback (verified finite at res=1). Stereo (`fltL/fltR`). It's a **global
+bounded by tanh feedback (verified finite at res=1; ladder family rings at res=1 BY DESIGN
+— `scripts/test_filter_stress.c` asserts bounded there, decay at res≤0.7). SVF-family
+LP/HP get **resonant-peak compensation** (`rtrim`, kicks in only when Q>1) so driving
+reso+cutoff polyphonically doesn't slam the output stage. Every voicing carries a
+**measured `trim`** level-matching it to Clean SVF on sustained 4-voice program
+(`scripts/test_voicing_levels.c` — the driven voicings' input tanh loses 2-4 dB, which
+the old output squash masked); re-run + re-bake after touching drive/kmin/kmax **or any
+gain upstream of the filter** (trims are level-dependent: they were re-baked once already
+when polyphony compensation lowered the bus level into the filter). Stereo (`fltL/fltR`). It's a **global
 master control** — `apply_preset` preserves it across preset loads (not per-preset). This is
 the primary tool for taming bright/high-pitched resonances.
 
@@ -97,7 +113,12 @@ in create_instance. This kills zipper/clicks (incl. the old Drive engage click).
 ## Level calibration = perceptual (peak + RMS)
 `makeup = min(0.42/peak, 0.13/rms)` — caps by transient peak AND sustained RMS, so long/
 bright resonances (pads, bells) don't read as loud as their attack. Output is halved
-(`level²·0.7`) with a gentle master limiter `out_limit` (0.9·tanh) so polyphony never clips.
+(`level²·0.7`); `out_limit` (2·tanh(x/2), headroom soft-clip) + the lookahead brickwall
+keep polyphony from ever hard-clipping.
+**Baking convention:** the meter now measures truly raw (its `__makeup=1.0` override used to
+be stomped by the old deferred preset apply); all shipped presets sit at **baked ≈ 0.5 × the
+raw-meter suggestion** (effective single-note peak ≈ 0.21). Calibrate new presets the same
+way — do NOT re-bake existing ones (users' tracks are balanced against them).
 
 ## Constants worth knowing
 `MAX_VOICES 6`, `DELAY_MAX 2048` (~21.5 Hz min), `N_ALLPASS 4`, `MAX_MODES 24`. SR 44100.
@@ -112,8 +133,20 @@ keys → fields via offsetof. Page-aware knob overlay via `PAGE_KEYS` + `current
   module.json exactly.
 - Enum `get_param` returns the option **string** (model/preset names); `set_param` accepts
   name or index. Regular `get_param` returns **raw** values (round-trips for state persistence).
+- **State blob** (`get_param("state")`, newline key=value): starts with `preset=<name>` then
+  `__makeup=`, then all PDESC fields. By-key `set_param("preset")` applies **immediately** and
+  is a **no-op if the preset is already current** — NEVER defer it (the deferred apply fired
+  after the host's state restore and stomped saved patches back to the factory preset; knob
+  path keeps the click-guarded deferred duck). `preset` sits FIRST in chain_params for the
+  same reason. Round-trip test: `scripts/test_state.c` (same docker fizzik-native invocation
+  as test_levels.c).
 - `get_param` returns **-1** for unknown keys (0 breaks Master FX menu editing).
-- Trigger knobs (rnd_*) = `type:int` 0..127; fire on nonzero; get_param returns "0".
+- Trigger knobs (rnd_*) = `type:enum ["idle","trigger"]` with **`access:"write"`** (v1.0+
+  fire-on button — the host renders a button, click fires, never scrubs). DSP fires on
+  "trigger" or nonzero; get_param returns "0"; excluded from state.
+- **LFO viz**: both LFO groups declare `viz {group, role}` (rate/depth/shape) in chain_params
+  (module.json AND the DSP-served copy) so BOTH draw the animated LFO graphic — the host's
+  detector alone only resolves ONE LFO group per page (that was the "LFO2 is plain knobs" bug).
 - module.json is cached at host startup — **power-cycle the Move** to reload it.
 
 ## Build & deploy
