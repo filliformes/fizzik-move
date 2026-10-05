@@ -23,6 +23,8 @@ all DSP reimplemented independently in C for the Move.
 3. Play the pads. **Press into a held pad** — polyphonic aftertouch makes notes bloom,
    swell, and sing (pick a feel with **AT Preset** on the Aftertouch page).
 4. Sculpt live with the global **filter** (Patch knobs 5–8) — 12 analog voicings.
+5. Got an **MPE controller**? Set the slot to Receive **All**, turn **MPE On** on the last
+   page, and every finger gets its own pitch bend, pressure and timbre.
 
 ---
 
@@ -185,6 +187,45 @@ Cello · Wild · Sforzato.
 
 Channel aftertouch (from external MIDI) is also supported.
 
+### 10 · MPE — per-note expression from external controllers
+
+Plug in an MPE controller (LinnStrument, Seaboard, Osmose, Erae, Push 3…) and every
+finger gets its own pitch bend, pressure and timbre. Fizzik's bowed/struck physical
+models are exactly what MPE was made for: slide between notes, bow one string of a
+chord, brighten a single voice.
+
+**Setup:** set the Schwung slot's **Receive channel to All** and leave **Forward on
+Auto or Thru** (so the per-note channels reach the synth untouched — an explicit forward
+channel would flatten them), then turn **MPE On** here. Leave your controller on its
+default MPE layout (lower zone, 48-semitone bend) and it just works.
+
+| # | Param | What it does |
+|---|---|---|
+| 1 | **MPE** | Off / On. Off = classic behaviour (channels ignored) |
+| 2 | **Zone** | Lower (master ch 1, notes on 2–16) or Upper (master ch 16, notes on 1–15) |
+| 3 | **Bend Range** | Per-note pitch-bend range in semitones (1–96, default 48 — match your controller) |
+| 4 | **Mstr Bend** | Master-channel / global bend range (0–24, default 2) |
+| 5 | **Pressure** | How much per-note pressure drives the Aftertouch engine |
+| 6 | **Timbre** | Depth of the controller's Y axis (CC74) |
+| 7 | **Timbre Tgt** | What Y does: **Bright** (resonator brightness, centred), **Bow** (continuous bowing), **Vib** (vibrato depth) or **Cutoff** (global filter) |
+| 8 | **Bend Glide** | Pitch-bend smoothing, ~1–60 ms (low = precise slides, high = liquid) |
+
+- **Pressure goes through the Aftertouch page** — so every AT Preset (Bow, Cello, Swell…)
+  is instantly an MPE pressure preset, per finger.
+- **Pitch bend works without MPE too:** with MPE Off, a normal bend wheel bends all
+  notes by the *Mstr Bend* range.
+- All MPE settings are part of the global performance layer: they survive preset changes
+  and are saved with your track.
+- **The Move's own pads are not MPE** (they send polyphonic aftertouch, handled by the
+  Aftertouch page) — this page is for external controllers.
+- Zone and bend range are set with the knobs; the controller's own MPE configuration
+  messages are not read. If slides land flat or sharp, match **Bend Range** to your
+  controller.
+
+> **New in 0.2.0.** MPE has been verified with generated MIDI streams (per-note bend,
+> channel isolation, pressure, timbre), but not yet with every hardware controller.
+> If yours behaves oddly, please open an issue with the controller model and settings.
+
 ---
 
 ## Presets (31)
@@ -219,6 +260,8 @@ is the main tool for taming a patch that's too bright.
 - **Bell into drum:** Reson A = Plate (Tune +12), Reson B = Membrane, Balance center,
   Couple ~30% — struck metal over a resonant skin.
 - **Bowing without a bow:** AT Preset = *Bow* or *Cello*, hold a pluck and press.
+- **MPE cello:** MPE On, Timbre Tgt = *Bow*, AT Preset = *Vibrato* — slide Y to bow each
+  string, press for vibrato, glide between notes with per-finger pitch bend.
 - **Dub station:** Delay mix + feedback up, then ride Dly Time — tape-style warble.
 - **One-button mayhem, safely:** park on Patch, hit **Rnd Patch** between phrases. The
   limiter ceiling guarantees it never gets dangerous.
@@ -232,6 +275,45 @@ MOVE_HOST=move.local ./scripts/install.sh
 
 Requires Docker (`aarch64-linux-gnu-gcc`). Single C file, no dependencies. Power-cycle
 the Move after installing so it reloads the module metadata.
+
+### Offline tests
+
+The DSP links natively, so behaviour is checked without a Move (any gcc; the repo uses a
+`fizzik-native` Debian image):
+
+```bash
+gcc -O2 -ffast-math -o /tmp/t scripts/test_state.c src/dsp/fizzik.c -lm && /tmp/t
+```
+
+| Test | Checks |
+|---|---|
+| `test_state.c` | Saved tracks/presets restore exactly (preset, level, every page incl. MPE) |
+| `test_mpe.c` | Per-note bend, channel isolation, bend seeding, channel-aware note-off, CC74 bow |
+| `test_filter_stress.c` | 12 voicings × 4 types at full resonance stay bounded; chords don't clip |
+| `test_voicing_levels.c` | All filter voicings level-matched to Clean SVF |
+| `test_levels.c` | Per-preset loudness calibration meter |
+
+`scripts/mpe_demo.py` (Windows, experimental) plays an MPE test stream into the Move over
+USB for trying MPE without a controller — run `probe` first to find the port that reaches
+Fizzik. It depends on the PC's MIDI service opening the Move's ports, which is not
+reliable on every machine.
+
+## Changelog
+
+**0.2.0**
+- **MPE** for external controllers: per-note pitch bend, pressure and timbre (CC74), on a
+  new MPE page (zone, bend ranges, pressure/timbre depth, timbre target, bend glide).
+- Pitch bend now works without MPE too (bend wheel → all notes, *Mstr Bend* range).
+- On-device help rewritten to match the current pages.
+
+**0.1.1**
+- Fixed saved tracks reopening on a factory preset; presets/tracks now restore exactly.
+- New **Init** preset (blank patch).
+- Chords no longer distort: real polyphonic headroom; all 12 filter voicings level-matched.
+- Main page reworked (full filter on knobs, randomizers are buttons, Rnd All removed);
+  both LFOs draw the animated graphic.
+
+**0.1.0** — first release.
 
 ## Credits
 

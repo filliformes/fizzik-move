@@ -9,20 +9,22 @@
         "resonators per voice: String, Beam,",
         "Plate or Membrane. Couple cross-feeds",
         "them for emergent, living timbres.",
-        "6 voices. Press pads for aftertouch."
+        "6 voices. Press pads for aftertouch.",
+        "MPE controllers supported."
       ]
     },
     {
       "title": "Patch (root)",
       "lines": [
-        "Preset: 30 sounds, click-free switch.",
-        "Rnd Patch: new random instrument.",
-        "Rnd Exc: new strike (hear next note).",
-        "Rnd Reson: new resonator pair.",
-        "Rnd All: randomize EVERYTHING (FX,",
-        "LFOs, aftertouch too; limiter safe).",
-        "Cutoff/Resonance/Type: global filter.",
-        "Menu: Voicing (12 analog filters)."
+        "Preset: 31 sounds, click-free switch.",
+        "Last one, Init, is a blank patch to",
+        "build your own sounds from.",
+        "Rnd Patch / Rnd Exc / Rnd Reson are",
+        "BUTTONS - click to fire: new random",
+        "instrument / strike (heard on the",
+        "next note) / resonator pair.",
+        "Cutoff/Resonance/Type/Voicing: the",
+        "global filter, 12 analog voicings."
       ]
     },
     {
@@ -107,6 +109,27 @@
       ]
     },
     {
+      "title": "MPE",
+      "lines": [
+        "For external MPE controllers: every",
+        "finger gets its own bend, pressure",
+        "and timbre. Move's own pads are not",
+        "MPE (they use the Aftertouch page).",
+        "Setup: slot Receive = All, Forward",
+        "= Auto/Thru, then MPE On.",
+        "Zone: Lower (master ch1) or Upper.",
+        "Bend Range: per-note, match your",
+        "controller (48 is standard).",
+        "Mstr Bend: global bend range - also",
+        "the bend-wheel range with MPE Off.",
+        "Pressure: depth into the Aftertouch",
+        "engine (AT Presets apply per note).",
+        "Timbre + Tgt: the Y axis (CC74) to",
+        "Bright, Bow, Vib or Cutoff.",
+        "Bend Glide: bend smoothing."
+      ]
+    },
+    {
       "title": "Tips",
       "lines": [
         "Detune B +7 or +12 from A, raise",
@@ -114,9 +137,12 @@
         "AT Bow + long Amp Rel = bowing.",
         "Ladder voicings self-oscillate at",
         "max Resonance (bounded, safe).",
-        "Presets keep your filter/AT/FX2",
+        "Presets keep your filter/AT/FX2/MPE",
         "setup - it is a global layer.",
-        "Rnd All never touches Lim Ceil."
+        "A MIDI keyboard's bend wheel works",
+        "(range = Mstr Bend on the MPE page).",
+        "MPE: Timbre Tgt = Bow lets the Y",
+        "axis bow each string on its own."
       ]
     }
   ]

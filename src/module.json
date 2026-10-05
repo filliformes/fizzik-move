@@ -1,7 +1,7 @@
 {
   "id": "fizzik",
   "name": "Fizzik",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "api_version": 2,
   "component_type": "sound_generator",
   "description": "Polyphonic simplex physical-modeling synth: two coupled resonators (string/beam/plate/membrane) with tension-modulation.",
@@ -28,7 +28,8 @@
             {"level": "FX", "label": "FX"},
             {"level": "FX2", "label": "FX 2"},
             {"level": "Mod", "label": "Mod"},
-            {"level": "Touch", "label": "Aftertouch"}
+            {"level": "Touch", "label": "Aftertouch"},
+            {"level": "MPE", "label": "MPE"}
           ]
         },
         "Exciter": {
@@ -70,6 +71,11 @@
           "name": "Aftertouch",
           "knobs": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"],
           "params": ["at_preset", "at_bright", "at_bow", "at_cutoff", "at_vib", "at_bend", "at_vrate", "at_curve"]
+        },
+        "MPE": {
+          "name": "MPE",
+          "knobs": ["mpe", "mpe_zone", "mpe_bend", "mpe_mbend", "mpe_press", "mpe_cc74", "mpe_cc74_tgt", "mpe_smooth"],
+          "params": ["mpe", "mpe_zone", "mpe_bend", "mpe_mbend", "mpe_press", "mpe_cc74", "mpe_cc74_tgt", "mpe_smooth"]
         }
       }
     },
@@ -154,7 +160,16 @@
       {"key": "at_vib", "name": "AT Vib", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "at_bend", "name": "AT Bend", "type": "float", "min": 0, "max": 1, "step": 0.01},
       {"key": "at_vrate", "name": "AT Vib Rate", "type": "float", "min": 0, "max": 1, "step": 0.01},
-      {"key": "at_curve", "name": "AT Curve", "type": "float", "min": 0, "max": 1, "step": 0.01}
+      {"key": "at_curve", "name": "AT Curve", "type": "float", "min": 0, "max": 1, "step": 0.01},
+
+      {"key": "mpe", "name": "MPE", "type": "enum", "options": ["Off", "On"]},
+      {"key": "mpe_zone", "name": "Zone", "type": "enum", "options": ["Lower", "Upper"]},
+      {"key": "mpe_bend", "name": "Bend Range", "type": "int", "min": 1, "max": 96, "step": 1},
+      {"key": "mpe_mbend", "name": "Mstr Bend", "type": "int", "min": 0, "max": 24, "step": 1},
+      {"key": "mpe_press", "name": "Pressure", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "mpe_cc74", "name": "Timbre", "type": "float", "min": 0, "max": 1, "step": 0.01},
+      {"key": "mpe_cc74_tgt", "name": "Timbre Tgt", "type": "enum", "options": ["Bright", "Bow", "Vib", "Cutoff"]},
+      {"key": "mpe_smooth", "name": "Bend Glide", "type": "float", "min": 0, "max": 1, "step": 0.01}
     ]
   }
 }

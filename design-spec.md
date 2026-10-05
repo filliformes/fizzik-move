@@ -157,3 +157,26 @@ randomisation ranges (see `/move` preset pattern).
 - Collision / unilateral-contact nonlinearity (buzz/rattle).
 - Per-parameter modulation matrix (MechanOdd's 12 modulators).
 - Bus/master effect chains beyond a single Space reverb.
+
+---
+
+## As shipped (this spec is the original pre-build design)
+
+The released instrument has diverged from the page layout above; `README.md` is the user
+manual and `CLAUDE.md` the current engineering reference. Summary of what changed:
+
+- **0.1.0** — root page became Patch (preset + randomizers + a 12-voicing global filter);
+  added FX, FX 2 (EQ/chorus/glue/limiter), Mod (2 LFOs) and Aftertouch (poly AT) pages;
+  30 presets.
+- **0.1.1** — exact state restore (preset + makeup in the state blob), Init preset, root
+  page reorder, fire-button randomizers, declared LFO viz groups, headroom soft-clip +
+  polyphony compensation, measured per-voicing level trims.
+- **0.2.0 — MPE addendum.** Channel-aware `on_midi`: each voice remembers its MIDI
+  channel; per-channel pitch bend (0xE0), channel pressure (0xD0) and CC74 route to that
+  channel's voice; the zone master channel is global. Pressure reuses the aftertouch
+  engine; CC74 targets Bright / Bow / Vib / Cutoff. Eight params on a tenth "MPE" page
+  (`mpe`, `mpe_zone`, `mpe_bend`, `mpe_mbend`, `mpe_press`, `mpe_cc74`, `mpe_cc74_tgt`,
+  `mpe_smooth`), all in the global performance layer. With MPE off, 0xE0 is a plain
+  global bend. The host needs only slot Receive = All (channels pass through untouched).
+  Not implemented: reading the controller's MPE zone-configuration RPN (zone and ranges
+  are set by knob).

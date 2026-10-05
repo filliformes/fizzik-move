@@ -50,6 +50,11 @@ int main(void) {
     a->set_param(A, "lfo1_target", "Couple");
     a->set_param(A, "at_preset", "Cello");
     a->set_param(A, "at_bow", "0.7700");           /* tweak AFTER the AT preset */
+    a->set_param(A, "mpe", "On");                  /* MPE page (global layer) */
+    a->set_param(A, "mpe_zone", "Upper");
+    a->set_param(A, "mpe_bend", "24");
+    a->set_param(A, "mpe_cc74_tgt", "Bow");
+    a->set_param(A, "mpe_smooth", "0.6000");
     int n1 = a->get_param(A, "state", s1, sizeof(s1));
     CHECK(n1 > 0, "get_param(state) returned %d", n1);
     CHECK(strstr(s1, "preset=BrokenMusicBox\n") == s1, "state must start with the preset name, got: %.40s", s1);

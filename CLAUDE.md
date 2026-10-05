@@ -38,6 +38,7 @@ Modal core = bank of ≤24 RBJ band-pass biquads, recomputed only when pitch/str
 7. **FX2**: eq_tone, eq_body, cho_mix, cho_rate, cho_depth, comp_amt, lim_drive, lim_ceil
 8. **Mod**: lfo1_rate/depth/shape/target, lfo2_rate/depth/shape/target
 9. **Aftertouch (Touch)**: at_preset (10), at_bright, at_bow, at_cutoff, at_vib, at_bend, at_vrate, at_curve
+10. **MPE** (last): mpe (Off/On), mpe_zone (Lower/Upper), mpe_bend (1..96 st, def 48), mpe_mbend (0..24 st, def 2), mpe_press, mpe_cc74, mpe_cc74_tgt (Bright/Bow/Vib/Cutoff), mpe_smooth
 
 ## Global params & the GLOBAL region
 `params_t` splits at `GLOBAL_PARAMS_OFF` (= offsetof flt_cutoff). Everything from there
@@ -51,6 +52,31 @@ brightness (adds to resonator tone at retune), **bow** (noise re-excitation into
 plucks bloom into sustains), cutoff (peak pressure → global filter), vibrato + bend (per-voice
 pitch at block-rate retune). 10 AT presets (`AT_PRESETS`) set all seven depths at once via
 `apply_at_preset`. Also handles channel AT (0xD0).
+
+## MPE (v0.2.0) — per-note expression from external controllers
+`on_midi` is channel-aware when `mpe_on`: each voice stores its `chan`; per-channel 0xE0
+(bend), 0xD0 (pressure) and CC74 (timbre) route to that channel's voice(s); the zone master
+channel (0 for Lower, 15 for Upper) is global. Host side needs NOTHING but the slot set to
+**Receive: All** — Schwung's direct MIDI_IN path preserves original channels for exactly
+this (`shadow_midi.c`, "preserve original channels for MPE").
+- **Bend**: `v->bend_n` (normalized) × `mpe_bend` + `master_bend_n` × `mpe_mbend`, smoothed in
+  semitones at block rate (`bend_sm`, `mpe_smooth` → 1..60 ms) and added to `semi` in the
+  per-block retune. With MPE **Off**, 0xE0 on any channel is a plain global bend (mbend range).
+- **Pressure** feeds the existing per-voice `pressure` → the whole at_* engine (AT presets =
+  MPE pressure presets), scaled by `mpe_press` at ingest.
+- **CC74** → `v->timbre` (smoothed like pressure) → target: Bright (BIPOLAR around 0.5, adds
+  to tone), Bow (adds to bow re-excitation), Vib (vibrato depth), Cutoff (max across voices
+  → global filter, like at_cutoff).
+- **Channel caches** (`chan_bend[]`, `chan_timbre[]`): controllers send bend/timbre BEFORE
+  note-on → note-on seeds from them and PRIMES `bend_sm` at its target (no glide-in).
+  `timbre_seen` bitmask: a channel that never sent CC74 is NEUTRAL for the selected target
+  (0.5 for Bright, 0 for the unipolar ones) — defaulting to 0 made every MPE note read
+  "fully dark" in Bright mode (caught by test_mpe's neutral-timbre check).
+- Note-off matches (note, chan) with a note-only fallback (no stuck notes from odd controllers).
+- All 8 params live at the END of `params_t` (GLOBAL region → persist across presets) and in
+  PDESC (state round-trip). Tests: `scripts/test_mpe.c` — pitch asserted by ZCR ratio over an
+  identical EARLY timeline (an octave-up string decays ~2× faster: a late window measures
+  silence, not pitch); sustained voices for note-off tests come from CC74→Bow.
 
 ## Modulation (2 LFOs) + master FX2
 Two block-rate LFOs (`lfo_block`, sine/tri/saw/square/S&H) → targets {Off,Cutoff,Pitch,Couple,
@@ -157,7 +183,15 @@ MOVE_HOST=move.local ./scripts/install.sh
 Power-cycle the Move after a module.json change; otherwise remove/re-add the module reloads dsp.so.
 
 ## Release
-`/move-schwung-release 0.1.0`. Tag `vX.Y.Z` must match `version` in `src/module.json`.
+Bump `version` in `src/module.json`, commit, `git tag -a vX.Y.Z`, push branch + tag — CI
+verifies tag == module.json version, builds, publishes the GitHub release and rewrites
+`release.json` (the Module Store reads it). Released: 0.1.0, 0.1.1, 0.2.0 (MPE).
+**Before every release, sync ALL user-facing docs** — `README.md` (pages, changelog),
+`src/help.json` (the ON-DEVICE help; it shipped stale in 0.1.1 — still listed Rnd All and
+30 presets), and the "As shipped" section of `design-spec.md`.
+MPE was released verified by synthetic MIDI only (`scripts/test_mpe.c`); no hardware MPE
+controller was available, and `scripts/mpe_demo.py` (PC→Move over USB via winmm) could not
+be exercised because opening a Move port stalled the Windows MIDI service on the dev PC.
 
 ## Provenance
 Inspired by MechanOdd (odoare / FX-Mechanics, no license declared). Algorithms reimplemented

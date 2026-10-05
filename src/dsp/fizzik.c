@@ -76,7 +76,7 @@ static const char *PRESET_NAMES[N_PRESETS] = {
 };
 
 /* Page-aware knob overlay: keys per page (index = current_page). */
-static const char *PAGE_KEYS[9][8] = {
+static const char *PAGE_KEYS[10][8] = {
     { "preset","rnd_patch","rnd_exc","rnd_reson","cutoff","resonance","ftype","voicing" },
     { "exc_mix","exc_crackle","exc_color","exc_attack","exc_decay","exc_reso","vel_level","vel_color" },
     { "a_model","a_struct","a_decay","a_damp","a_pos","a_tone","a_tune","a_tension" },
@@ -85,9 +85,10 @@ static const char *PAGE_KEYS[9][8] = {
     { "rev_mix","rev_size","rev_damp","dly_mix","dly_time","dly_fb","dly_tone","width" },
     { "eq_tone","eq_body","cho_mix","cho_rate","cho_depth","comp_amt","lim_drive","lim_ceil" },
     { "lfo1_rate","lfo1_depth","lfo1_shape","lfo1_target","lfo2_rate","lfo2_depth","lfo2_shape","lfo2_target" },
-    { "at_preset","at_bright","at_bow","at_cutoff","at_vib","at_bend","at_vrate","at_curve" }
+    { "at_preset","at_bright","at_bow","at_cutoff","at_vib","at_bend","at_vrate","at_curve" },
+    { "mpe","mpe_zone","mpe_bend","mpe_mbend","mpe_press","mpe_cc74","mpe_cc74_tgt","mpe_smooth" }
 };
-static const int PAGE_NKNOBS[9] = { 8, 8, 8, 8, 8, 8, 8, 8, 8 };
+static const int PAGE_NKNOBS[10] = { 8, 8, 8, 8, 8, 8, 8, 8, 8, 8 };
 
 /* ── Small helpers ───────────────────────────────────────────────────────────── */
 
@@ -550,6 +551,11 @@ typedef struct {
     float  _pr_shaped;             /* curve-shaped pressure (per block) */
     float  vib_phase;              /* per-voice vibrato LFO phase */
     uint32_t bow_rng;              /* re-excitation noise */
+    /* MPE: owning MIDI channel + per-note expression (bend normalized -1..1,
+     * CC74 timbre 0..1 with a smoothed shadow). */
+    int    chan;
+    float  bend_n, bend_sm;        /* target (normalized), smoothed (semitones) */
+    float  timbre, timbre_sm;
 } voice_t;
 
 /* ── Parameter block (also the preset layout) ────────────────────────────────── */
@@ -573,6 +579,10 @@ typedef struct {
     float lfo2_rate, lfo2_depth; int lfo2_shape, lfo2_target;
     /* Master FX2: EQ (tone/body), chorus (mix/rate/depth), comp, limiter. */
     float eq_tone, eq_body, cho_mix, cho_rate, cho_depth, comp_amt, lim_drive, lim_ceil;
+    /* MPE (still inside the GLOBAL region — persists across preset loads).
+     * mpe_mbend doubles as the plain pitch-bend range when MPE is Off. */
+    int   mpe_on, mpe_zone, mpe_bend, mpe_mbend, mpe_cc74_tgt;
+    float mpe_press, mpe_cc74, mpe_smooth;
 } params_t;
 #define GLOBAL_PARAMS_OFF offsetof(params_t, flt_cutoff)
 
@@ -734,6 +744,13 @@ static const char *LFO_SHAPE_NAMES[N_LFO_SHAPE] = { "Sine", "Tri", "Saw", "Squar
 static const char *LFO_TGT_NAMES[N_LFO_TGT] =
     { "Off", "Cutoff", "Pitch", "Couple", "Balance", "Tension", "Tone", "Reso" };
 
+/* MPE enums. Timbre = CC74 (the third MPE dimension): Bright is bipolar
+ * around CC74=64 (adds to resonator tone), the rest are unipolar. */
+#define N_MPE_TGT 4
+static const char *MPE_ON_NAMES[2]   = { "Off", "On" };
+static const char *MPE_ZONE_NAMES[2] = { "Lower", "Upper" };
+static const char *MPE_TGT_NAMES[N_MPE_TGT] = { "Bright", "Bow", "Vib", "Cutoff" };
+
 typedef struct { float phase, sh; uint32_t rng; } lfo_t;
 
 /* Advance one block, return bipolar value [-1,1]. rate in Hz. */
@@ -795,6 +812,11 @@ typedef struct {
     float    rev_send_lp;
     /* Polyphony compensation gain (n_eff^-0.35, smoothed; see render_block). */
     float    poly_gain;
+    /* MPE per-channel state (controllers send bend/timbre BEFORE note-on, so
+     * voice_start seeds from these) + master-channel / global pitch bend. */
+    float    chan_bend[16], chan_timbre[16];
+    uint16_t timbre_seen;          /* bit per channel: CC74 received at least once */
+    float    master_bend_n;
     /* Hidden metering (offline preset-gain calibration): pre-clamp peak/RMS. */
     double   meter_sumsq; float meter_peak; long meter_cnt;
 } fizzik_t;
@@ -888,6 +910,11 @@ static const pdesc_t PDESC[] = {
     PF("cho_mix","Chorus",0,1,0.01f,cho_mix), PF("cho_rate","Cho Rate",0,1,0.01f,cho_rate),
     PF("cho_depth","Cho Depth",0,1,0.01f,cho_depth), PF("comp_amt","Glue",0,1,0.01f,comp_amt),
     PF("lim_drive","Lim Drive",0,1,0.01f,lim_drive), PF("lim_ceil","Lim Ceil",0,1,0.01f,lim_ceil),
+
+    PI_("mpe","MPE",0,1,1,mpe_on), PI_("mpe_zone","Zone",0,1,1,mpe_zone),
+    PI_("mpe_bend","Bend Range",1,96,1,mpe_bend), PI_("mpe_mbend","Mstr Bend",0,24,1,mpe_mbend),
+    PF("mpe_press","Pressure",0,1,0.01f,mpe_press), PF("mpe_cc74","Timbre",0,1,0.01f,mpe_cc74),
+    PI_("mpe_cc74_tgt","Timbre Tgt",0,N_MPE_TGT-1,1,mpe_cc74_tgt), PF("mpe_smooth","Bend Glide",0,1,0.01f,mpe_smooth),
 };
 static const int N_PDESC = (int)(sizeof(PDESC) / sizeof(PDESC[0]));
 
@@ -954,6 +981,10 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
      * linear, about -3.5 dB) so the synth can't get ear-splitting on headphones,
      * even at high resonance / screechy patches. User can raise it if they want. */
     inst->p.comp_amt = 0.0f; inst->p.lim_drive = 0.0f; inst->p.lim_ceil = 0.35f;
+    /* MPE defaults (Off; MPE-spec bend ranges: member 48, master/global 2). */
+    inst->p.mpe_on = 0; inst->p.mpe_zone = 0; inst->p.mpe_bend = 48; inst->p.mpe_mbend = 2;
+    inst->p.mpe_press = 1.0f; inst->p.mpe_cc74 = 0.5f; inst->p.mpe_cc74_tgt = 0;
+    inst->p.mpe_smooth = 0.25f;
     inst->lim_gain = 1.0f;
     inst->poly_gain = 1.0f;
     inst->rnd_gain = 1.0f;   /* rnd_phase / pending_rnd = 0 (idle) from calloc */
@@ -988,6 +1019,7 @@ static void voice_start(fizzik_t *inst, voice_t *v, int note, float vel) {
     v->amp_env = 0.0f; v->amp_stage = 0;
     v->prevA = v->prevB = 0.0f;
     v->pressure = 0.0f; v->pressure_sm = 0.0f; v->vib_phase = 0.0f;
+    v->chan = 0; v->bend_n = 0.0f; v->timbre = 0.0f; v->timbre_sm = 0.0f;
     v->silent = 0;
     v->dcA.x1 = v->dcA.y1 = v->dcB.x1 = v->dcB.y1 = 0.0f;
     exciter_note_on(&v->exc);
@@ -1005,15 +1037,52 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
     fizzik_t *inst = (fizzik_t *)instance;
     if (len < 2) return;
     uint8_t status = msg[0] & 0xF0;
+    int ch = msg[0] & 0x0F;
+    /* MPE: per-note expression rides the MIDI channel (one note per member
+     * channel; the zone master channel carries global messages). The host
+     * preserves original channels when the slot receives All (its direct
+     * MIDI_IN path exists for exactly this). With MPE Off, channels are
+     * ignored exactly as before — except 0xE0, which now works as a normal
+     * global pitch bend (range mpe_mbend). */
+    int mpe = inst->p.mpe_on;
+    int master = (inst->p.mpe_zone == 0) ? 0 : 15;
+
     /* Channel aftertouch is a 2-byte message (status + pressure) — handle it
      * before requiring a 3rd byte. */
     if (status == 0xD0) {
-        float pr = msg[1] / 127.0f;
-        for (int i = 0; i < MAX_VOICES; i++)
-            if (inst->v[i].active && inst->v[i].held) inst->v[i].pressure = pr;
+        float pr = (msg[1] / 127.0f) * (mpe ? clampf(inst->p.mpe_press, 0.0f, 1.0f) : 1.0f);
+        for (int i = 0; i < MAX_VOICES; i++) {
+            voice_t *v = &inst->v[i];
+            if (!v->active || !v->held) continue;
+            if (mpe && ch != master && v->chan != ch) continue;   /* per-note */
+            v->pressure = pr;
+        }
         return;
     }
     if (len < 3) return;
+
+    if (status == 0xE0) {                 /* pitch bend (14-bit) */
+        float norm = (float)(((int)msg[2] << 7 | (int)msg[1]) - 8192) / 8192.0f;
+        if (!mpe || ch == master) { inst->master_bend_n = norm; return; }
+        inst->chan_bend[ch] = norm;
+        for (int i = 0; i < MAX_VOICES; i++)
+            if (inst->v[i].active && inst->v[i].chan == ch) inst->v[i].bend_n = norm;
+        return;
+    }
+    if (status == 0xB0 && msg[1] == 74 && mpe) {   /* CC74: MPE timbre (Y) */
+        float t = msg[2] / 127.0f;
+        if (ch == master) {
+            for (int i = 0; i < MAX_VOICES; i++)
+                if (inst->v[i].active) inst->v[i].timbre = t;
+        } else {
+            inst->chan_timbre[ch] = t;
+            inst->timbre_seen |= (uint16_t)(1u << ch);
+            for (int i = 0; i < MAX_VOICES; i++)
+                if (inst->v[i].active && inst->v[i].chan == ch) inst->v[i].timbre = t;
+        }
+        return;
+    }
+
     int note = msg[1];
     int vel  = msg[2];
 
@@ -1029,13 +1098,45 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
                 if (score < best) { best = score; slot = i; }
             }
         }
-        voice_start(inst, &inst->v[slot], note, vel / 127.0f);
-    } else if (status == 0x80 || (status == 0x90 && vel == 0)) {
-        for (int i = 0; i < MAX_VOICES; i++)
-            if (inst->v[i].active && inst->v[i].held && inst->v[i].note == note) {
-                inst->v[i].held = 0;
-                if (inst->v[i].amp_stage < 2) inst->v[i].amp_stage = 2;   /* release */
+        voice_t *v = &inst->v[slot];
+        voice_start(inst, v, note, vel / 127.0f);
+        v->chan = ch;
+        /* MPE controllers send bend/timbre for the member channel BEFORE the
+         * note-on — seed from the channel cache so the first block is right. */
+        if (mpe) {
+            /* A channel that never sent CC74 must be NEUTRAL for the selected
+             * target: centre for the bipolar Bright (else every note is read
+             * as "fully dark"), zero for the unipolar Bow/Vib/Cutoff. */
+            float neutral = (inst->p.mpe_cc74_tgt == 0) ? 0.5f : 0.0f;
+            v->timbre = neutral;
+            if (ch != master) {
+                v->bend_n = inst->chan_bend[ch];
+                if ((inst->timbre_seen >> ch) & 1u) v->timbre = inst->chan_timbre[ch];
             }
+        }
+        v->timbre_sm = v->timbre;
+        /* Prime the bend smoother at its target: a note struck while bend is
+         * held must START there, not glide up from zero. */
+        v->bend_sm = (mpe ? v->bend_n * (float)inst->p.mpe_bend : 0.0f)
+                   + inst->master_bend_n * (float)inst->p.mpe_mbend;
+    } else if (status == 0x80 || (status == 0x90 && vel == 0)) {
+        int matched = 0;
+        for (int i = 0; i < MAX_VOICES; i++) {
+            voice_t *v = &inst->v[i];
+            if (!v->active || !v->held || v->note != note) continue;
+            if (mpe && v->chan != ch) continue;   /* same note may be held on another channel */
+            v->held = 0;
+            if (v->amp_stage < 2) v->amp_stage = 2;   /* release */
+            matched = 1;
+        }
+        /* Safety: a misbehaving controller that releases on a different
+         * channel must not leave a stuck note. */
+        if (mpe && !matched)
+            for (int i = 0; i < MAX_VOICES; i++)
+                if (inst->v[i].active && inst->v[i].held && inst->v[i].note == note) {
+                    inst->v[i].held = 0;
+                    if (inst->v[i].amp_stage < 2) inst->v[i].amp_stage = 2;
+                }
     } else if (status == 0xA0) {          /* polyphonic aftertouch (per note) */
         float pr = vel / 127.0f;
         for (int i = 0; i < MAX_VOICES; i++)
@@ -1176,6 +1277,7 @@ static void set_param(void *instance, const char *key, const char *val) {
         else if (strcmp(val, "FX2")    == 0) inst->current_page = 6;
         else if (strcmp(val, "Mod")    == 0) inst->current_page = 7;
         else if (strcmp(val, "Touch")  == 0) inst->current_page = 8;
+        else if (strcmp(val, "MPE")    == 0) inst->current_page = 9;
         return;
     }
 
@@ -1252,6 +1354,9 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "lfo2_shape") == 0)  { inst->p.lfo2_shape = parse_enum(val, LFO_SHAPE_NAMES, N_LFO_SHAPE); return; }
     if (strcmp(key, "lfo1_target") == 0) { inst->p.lfo1_target = parse_enum(val, LFO_TGT_NAMES, N_LFO_TGT); return; }
     if (strcmp(key, "lfo2_target") == 0) { inst->p.lfo2_target = parse_enum(val, LFO_TGT_NAMES, N_LFO_TGT); return; }
+    if (strcmp(key, "mpe") == 0)          { inst->p.mpe_on = parse_enum(val, MPE_ON_NAMES, 2); return; }
+    if (strcmp(key, "mpe_zone") == 0)     { inst->p.mpe_zone = parse_enum(val, MPE_ZONE_NAMES, 2); return; }
+    if (strcmp(key, "mpe_cc74_tgt") == 0) { inst->p.mpe_cc74_tgt = parse_enum(val, MPE_TGT_NAMES, N_MPE_TGT); return; }
 
     /* State restore: newline-separated key=value. */
     if (strcmp(key, "state") == 0) {
@@ -1371,7 +1476,15 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "{\"key\":\"at_vib\",\"name\":\"AT Vib\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"at_bend\",\"name\":\"AT Bend\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
           "{\"key\":\"at_vrate\",\"name\":\"AT Vib Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-          "{\"key\":\"at_curve\",\"name\":\"AT Curve\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01}"
+          "{\"key\":\"at_curve\",\"name\":\"AT Curve\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"mpe\",\"name\":\"MPE\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"]},"
+          "{\"key\":\"mpe_zone\",\"name\":\"Zone\",\"type\":\"enum\",\"options\":[\"Lower\",\"Upper\"]},"
+          "{\"key\":\"mpe_bend\",\"name\":\"Bend Range\",\"type\":\"int\",\"min\":1,\"max\":96,\"step\":1},"
+          "{\"key\":\"mpe_mbend\",\"name\":\"Mstr Bend\",\"type\":\"int\",\"min\":0,\"max\":24,\"step\":1},"
+          "{\"key\":\"mpe_press\",\"name\":\"Pressure\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"mpe_cc74\",\"name\":\"Timbre\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+          "{\"key\":\"mpe_cc74_tgt\",\"name\":\"Timbre Tgt\",\"type\":\"enum\",\"options\":[\"Bright\",\"Bow\",\"Vib\",\"Cutoff\"]},"
+          "{\"key\":\"mpe_smooth\",\"name\":\"Bend Glide\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01}"
           "]");
     }
 
@@ -1379,7 +1492,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         return snprintf(buf, buf_len,
           "{\"modes\":null,\"levels\":{"
           "\"root\":{\"name\":\"Fizzik\",\"knobs\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\"],"
-          "\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\",{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"FX2\",\"label\":\"FX 2\"},{\"level\":\"Mod\",\"label\":\"Mod\"},{\"level\":\"Touch\",\"label\":\"Aftertouch\"}]},"
+          "\"params\":[\"preset\",\"rnd_patch\",\"rnd_exc\",\"rnd_reson\",\"cutoff\",\"resonance\",\"ftype\",\"voicing\",{\"level\":\"Exciter\",\"label\":\"Exciter\"},{\"level\":\"ResonA\",\"label\":\"Reson A\"},{\"level\":\"ResonB\",\"label\":\"Reson B\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"},{\"level\":\"FX2\",\"label\":\"FX 2\"},{\"level\":\"Mod\",\"label\":\"Mod\"},{\"level\":\"Touch\",\"label\":\"Aftertouch\"},{\"level\":\"MPE\",\"label\":\"MPE\"}]},"
           "\"Exciter\":{\"name\":\"Exciter\",\"knobs\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"],\"params\":[\"exc_mix\",\"exc_crackle\",\"exc_color\",\"exc_attack\",\"exc_decay\",\"exc_reso\",\"vel_level\",\"vel_color\"]},"
           "\"ResonA\":{\"name\":\"Reson A\",\"knobs\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"],\"params\":[\"a_model\",\"a_struct\",\"a_decay\",\"a_damp\",\"a_pos\",\"a_tone\",\"a_tune\",\"a_tension\"]},"
           "\"ResonB\":{\"name\":\"Reson B\",\"knobs\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"],\"params\":[\"b_model\",\"b_struct\",\"b_decay\",\"b_damp\",\"b_pos\",\"b_tone\",\"b_tune\",\"b_tension\"]},"
@@ -1387,7 +1500,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
           "\"FX\":{\"name\":\"FX\",\"knobs\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"],\"params\":[\"rev_mix\",\"rev_size\",\"rev_damp\",\"dly_mix\",\"dly_time\",\"dly_fb\",\"dly_tone\",\"width\"]},"
           "\"FX2\":{\"name\":\"FX 2\",\"knobs\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"],\"params\":[\"eq_tone\",\"eq_body\",\"cho_mix\",\"cho_rate\",\"cho_depth\",\"comp_amt\",\"lim_drive\",\"lim_ceil\"]},"
           "\"Mod\":{\"name\":\"Mod\",\"knobs\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"],\"params\":[\"lfo1_rate\",\"lfo1_depth\",\"lfo1_shape\",\"lfo1_target\",\"lfo2_rate\",\"lfo2_depth\",\"lfo2_shape\",\"lfo2_target\"]},"
-          "\"Touch\":{\"name\":\"Aftertouch\",\"knobs\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"],\"params\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"]}"
+          "\"Touch\":{\"name\":\"Aftertouch\",\"knobs\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"],\"params\":[\"at_preset\",\"at_bright\",\"at_bow\",\"at_cutoff\",\"at_vib\",\"at_bend\",\"at_vrate\",\"at_curve\"]},"
+          "\"MPE\":{\"name\":\"MPE\",\"knobs\":[\"mpe\",\"mpe_zone\",\"mpe_bend\",\"mpe_mbend\",\"mpe_press\",\"mpe_cc74\",\"mpe_cc74_tgt\",\"mpe_smooth\"],\"params\":[\"mpe\",\"mpe_zone\",\"mpe_bend\",\"mpe_mbend\",\"mpe_press\",\"mpe_cc74\",\"mpe_cc74_tgt\",\"mpe_smooth\"]}"
           "}}");
     }
 
@@ -1418,6 +1532,11 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(pk, "lfo2_shape") == 0) return snprintf(buf, buf_len, "%s", LFO_SHAPE_NAMES[inst->p.lfo2_shape % N_LFO_SHAPE]);
         if (strcmp(pk, "lfo1_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo1_target % N_LFO_TGT]);
         if (strcmp(pk, "lfo2_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo2_target % N_LFO_TGT]);
+        if (strcmp(pk, "mpe") == 0)          return snprintf(buf, buf_len, "%s", MPE_ON_NAMES[inst->p.mpe_on & 1]);
+        if (strcmp(pk, "mpe_zone") == 0)     return snprintf(buf, buf_len, "%s", MPE_ZONE_NAMES[inst->p.mpe_zone & 1]);
+        if (strcmp(pk, "mpe_cc74_tgt") == 0) return snprintf(buf, buf_len, "%s", MPE_TGT_NAMES[inst->p.mpe_cc74_tgt % N_MPE_TGT]);
+        if (strcmp(pk, "mpe_bend") == 0)  return snprintf(buf, buf_len, "%d st", inst->p.mpe_bend);
+        if (strcmp(pk, "mpe_mbend") == 0) return snprintf(buf, buf_len, "%d st", inst->p.mpe_mbend);
         const pdesc_t *d = find_pdesc(pk);
         if (d) {
             if (d->isint) return snprintf(buf, buf_len, "%d", *pi_ptr(inst, d));
@@ -1455,6 +1574,9 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "lfo2_shape") == 0) return snprintf(buf, buf_len, "%s", LFO_SHAPE_NAMES[inst->p.lfo2_shape % N_LFO_SHAPE]);
     if (strcmp(key, "lfo1_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo1_target % N_LFO_TGT]);
     if (strcmp(key, "lfo2_target") == 0) return snprintf(buf, buf_len, "%s", LFO_TGT_NAMES[inst->p.lfo2_target % N_LFO_TGT]);
+    if (strcmp(key, "mpe") == 0)          return snprintf(buf, buf_len, "%s", MPE_ON_NAMES[inst->p.mpe_on & 1]);
+    if (strcmp(key, "mpe_zone") == 0)     return snprintf(buf, buf_len, "%s", MPE_ZONE_NAMES[inst->p.mpe_zone & 1]);
+    if (strcmp(key, "mpe_cc74_tgt") == 0) return snprintf(buf, buf_len, "%s", MPE_TGT_NAMES[inst->p.mpe_cc74_tgt % N_MPE_TGT]);
     if (strcmp(key, "preset")  == 0) return snprintf(buf, buf_len, "%s", PRESET_NAMES[inst->preset_idx]);
     if (strncmp(key, "rnd_", 4) == 0) return snprintf(buf, buf_len, "0");   /* int trigger idle (Aphex-style) */
 
@@ -1542,14 +1664,27 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
     /* ── Aftertouch depths + peak pressure (drives the global cutoff mod) ── */
     float at_br=s->at_bright, at_bw=s->at_bow, at_ct=s->at_cutoff, at_vb=s->at_vib, at_bd=s->at_bend;
     float at_vhz=map_exp(s->at_vrate + 1e-4f, 3.0f, 9.0f), at_cv=s->at_curve;
-    float maxpress = 0.0f;
+    float maxpress = 0.0f, maxtimbre = 0.0f;
     for (int vi = 0; vi < MAX_VOICES; vi++)
-        if (inst->v[vi].active && inst->v[vi].pressure_sm > maxpress) maxpress = inst->v[vi].pressure_sm;
+        if (inst->v[vi].active) {
+            if (inst->v[vi].pressure_sm > maxpress) maxpress = inst->v[vi].pressure_sm;
+            if (inst->v[vi].timbre_sm > maxtimbre) maxtimbre = inst->v[vi].timbre_sm;
+        }
+
+    /* ── MPE (per-note bend + CC74 timbre routing) ── */
+    int   mpe_on   = inst->p.mpe_on;
+    int   cc74_tgt = inst->p.mpe_cc74_tgt;
+    float cc74_d   = mpe_on ? clampf(s->mpe_cc74, 0.0f, 1.0f) : 0.0f;
+    float bendR    = (float)inst->p.mpe_bend, mbendR = (float)inst->p.mpe_mbend;
+    /* Bend smoothing (block rate): mpe_smooth 0..1 -> ~1..60 ms one-pole. */
+    float bend_tau = 0.001f + clampf(s->mpe_smooth, 0.0f, 1.0f) * 0.059f;
+    float bcoef    = 1.0f - expf(-((float)frames * SR_INV) / bend_tau);
+    float cc74_cut = (cc74_tgt == 3) ? cc74_d * maxtimbre : 0.0f;   /* Cutoff target */
 
     /* Fold global mods into filter / couple / balance. */
     couple  = clampf(couple  + mod_cpl, 0.0f, 1.0f);
     balance = clampf(balance + mod_bal, 0.0f, 1.0f);
-    flt_fc  = map_exp(clampf(s->flt_cutoff + mod_cut + at_ct * maxpress, 0.0f, 1.0f), 30.0f, 18000.0f);
+    flt_fc  = map_exp(clampf(s->flt_cutoff + mod_cut + at_ct * maxpress + cc74_cut, 0.0f, 1.0f), 30.0f, 18000.0f);
     flt_g   = tanf(PI * clampf(flt_fc, 20.0f, 19500.0f) * SR_INV);
     flt_res = clampf(flt_res + mod_res, 0.0f, 1.0f);
 
@@ -1588,8 +1723,9 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             voice_t *v = &inst->v[vi];
             if (!v->active) continue;
 
-            /* Smooth pad pressure (~28 ms). */
+            /* Smooth pad pressure (~28 ms) + MPE timbre (same time constant). */
             v->pressure_sm += 0.0008f * (v->pressure - v->pressure_sm);
+            v->timbre_sm   += 0.0008f * (v->timbre - v->timbre_sm);
 
             /* Glide toward target. */
             if (glide_coef > 0.0f) v->freq += (v->freq_target - v->freq) * (1.0f - glide_coef);
@@ -1602,13 +1738,23 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
                                     : powf(pr, 1.0f / (1.0f + (at_cv - 0.5f) * 3.0f));
                 v->vib_phase += at_vhz * (float)frames * SR_INV;
                 if (v->vib_phase >= 1.0f) v->vib_phase -= 1.0f;
-                float vib = sinf(TWO_PI * v->vib_phase) * at_vb * pr;
-                float semi = mod_pit + at_bd * pr * 2.0f + vib;          /* bend up to 2 st, vib up to 1 st */
+                /* MPE per-note pitch bend (member range) + master/global bend
+                 * (mbend range — also the plain bend-wheel path with MPE Off),
+                 * smoothed in semitones at block rate. */
+                float btgt = (mpe_on ? v->bend_n * bendR : 0.0f) + inst->master_bend_n * mbendR;
+                v->bend_sm += bcoef * (btgt - v->bend_sm);
+                /* CC74 timbre routing: Vib adds vibrato depth; Bright is
+                 * bipolar around CC74=64 and rides the same tone-add path as
+                 * aftertouch brightness. */
+                float vib_add = (cc74_tgt == 2) ? v->timbre_sm * cc74_d : 0.0f;
+                float br_add  = (cc74_tgt == 0) ? (v->timbre_sm - 0.5f) * cc74_d : 0.0f;
+                float vib = sinf(TWO_PI * v->vib_phase) * (at_vb * pr + vib_add);
+                float semi = mod_pit + at_bd * pr * 2.0f + vib + v->bend_sm;   /* AT bend up to 2 st, vib up to 1 st */
                 float pfac = powf(2.0f, semi / 12.0f);
                 float fA = v->freq * pfac * powf(2.0f, (float)p->a_tune / 12.0f);
                 float fB = v->freq * pfac * powf(2.0f, (float)p->b_tune / 12.0f);
-                float aTone = clampf(s->a_tone + mod_ton + at_br * pr * 0.5f, 0.0f, 1.0f);
-                float bTone = clampf(s->b_tone + mod_ton + at_br * pr * 0.5f, 0.0f, 1.0f);
+                float aTone = clampf(s->a_tone + mod_ton + at_br * pr * 0.5f + br_add, 0.0f, 1.0f);
+                float bTone = clampf(s->b_tone + mod_ton + at_br * pr * 0.5f + br_add, 0.0f, 1.0f);
                 float aTens = clampf(s->a_tension + mod_ten, 0.0f, 1.0f);
                 float bTens = clampf(s->b_tension + mod_ten, 0.0f, 1.0f);
                 reso_set(&v->A, p->a_model & 3, fA, s->a_struct, s->a_decay, s->a_damp, s->a_pos, aTone, aTens, &rebuild_budget);
@@ -1622,7 +1768,11 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
             float exc = exciter_process(&v->exc, v->freq, exc_mix, exc_crk, color_cut, exc_reso, exc_atk_ms, exc_dec_ms);
             float vgain = 1.0f - vel_level * (1.0f - v->velocity);
             exc *= vgain;
-            exc += randbi(&v->bow_rng) * at_bw * v->_pr_shaped * 0.35f;   /* bow */
+            /* Bow re-excitation: aftertouch pressure, plus CC74 when Timbre
+             * Tgt = Bow (continuous bowing from the controller's Y axis). */
+            float bow_amt = at_bw * v->_pr_shaped;
+            if (cc74_tgt == 1) bow_amt += v->timbre_sm * cc74_d;
+            exc += randbi(&v->bow_rng) * bow_amt * 0.35f;
 
             /* Coupled resonators (1-sample cross feedback). */
             float inA = exc + couple * v->prevB;
